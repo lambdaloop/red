@@ -280,11 +280,11 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
             if (name.empty()) return fail("A camera in calibration.toml has no name (rule 4).");
 
             const auto off = toml_numbers(sec, "offset");
-            if (off.size() == 2 && (off[0] != 0.0 || off[1] != 0.0))
-                return fail("Camera " + name + " has offset [" + std::to_string(off[0]) + ", " +
-                            std::to_string(off[1]) + "]. red has no crop model, so these "
-                            "coordinates would be read against calibration that does not "
-                            "describe them.");
+            const bool has_offset = sec.find("offset = [") != std::string::npos;
+            if (has_offset && off.size() != 2)
+                return fail("Camera " + name + " has an invalid offset; expected [x, y].");
+            if (off.size() == 2 && (!std::isfinite(off[0]) || !std::isfinite(off[1])))
+                return fail("Camera " + name + " has a non-finite crop offset.");
 
             CameraParams c;
             const auto K = toml_numbers(sec, "matrix");
@@ -304,6 +304,15 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
             if (size.size() >= 2) {
                 c.image_width = (int)size[0];
                 c.image_height = (int)size[1];
+            }
+            // Tailcycle's matrix is expressed in full-sensor pixels while
+            // labels and media are in stored-image (crop-local) pixels. Red
+            // has no separate crop state, so normalize the calibration to the
+            // stored image by translating the principal point. Focal lengths,
+            // distortion, and extrinsics are unchanged by a pure pixel crop.
+            if (off.size() == 2) {
+                c.k(0, 2) -= off[0];
+                c.k(1, 2) -= off[1];
             }
             c.projection_mat = red_math::projectionFromKRt(c.k, c.r, c.tvec);
             out->camera_names.push_back(name);

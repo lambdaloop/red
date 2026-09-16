@@ -187,6 +187,11 @@ inline bool tailcycle_open_session(AppContext &ctx, const std::string &session_d
                     ctx.user_settings.default_realtime_playback);
     }
 
+    if (!ctx.ps.video_loaded) {
+        if (status) *status = "Media failed to load for " + s.session_id + "/" + s.group_id;
+        return false;
+    }
+
     if (remember) {
         remember->open_valid = true;
         remember->open_dir = session_dir;

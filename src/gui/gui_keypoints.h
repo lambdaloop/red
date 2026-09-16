@@ -71,6 +71,8 @@ inline bool gui_plot_keypoints(FrameAnnotation &fa, SkeletonContext *skeleton,
                 pt_size, ImPlotDragToolFlags_None, &drag_point_clicked,
                 &drag_point_hovered);
             if (drag_point_modified) {
+                // A drag turns a projected point back into a user annotation.
+                cam.keypoints[node].projected = false;
                 fa.kp3d[node].clear();
                 touched = true;
             }
@@ -276,6 +278,7 @@ inline bool solve_midline_constraint(FrameAnnotation &fa,
                 fa.cameras[v].keypoints[node].y = ry;
                 fa.cameras[v].keypoints[node].labeled = true;
                 fa.cameras[v].keypoints[node].source = LabelSource::Predicted;
+                fa.cameras[v].keypoints[node].projected = true;
             }
         }
     }
@@ -317,7 +320,8 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
         for (u32 view_idx = 0; view_idx < scene->num_cams; view_idx++) {
             if (view_idx < (u32)fa.cameras.size() &&
                 node < (u32)fa.cameras[view_idx].keypoints.size() &&
-                fa.cameras[view_idx].keypoints[node].labeled) {
+                fa.cameras[view_idx].keypoints[node].labeled &&
+                !fa.cameras[view_idx].keypoints[node].projected) {
                 num_views_labeled++;
             }
         }
@@ -330,7 +334,8 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
             for (u32 view_idx = 0; view_idx < scene->num_cams; view_idx++) {
                 if (view_idx >= (u32)fa.cameras.size()) continue;
                 if (node >= (u32)fa.cameras[view_idx].keypoints.size()) continue;
-                if (fa.cameras[view_idx].keypoints[node].labeled) {
+                if (fa.cameras[view_idx].keypoints[node].labeled &&
+                    !fa.cameras[view_idx].keypoints[node].projected) {
                     Eigen::Vector2d pt(
                         fa.cameras[view_idx].keypoints[node].x,
                         (double)scene->image_height[view_idx] -
@@ -368,6 +373,13 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                 if (view_idx >= (u32)fa.cameras.size()) continue;
                 if (node >= (u32)fa.cameras[view_idx].keypoints.size()) continue;
 
+                // Refresh every camera's coordinates, but retain the visible
+                // status of a point that was explicitly user-annotated. Only
+                // missing/previously projected points become `projected`.
+                auto &kp2d = fa.cameras[view_idx].keypoints[node];
+                const bool user_annotated = kp2d.labeled && !kp2d.projected;
+                if (!user_annotated) kp2d = Keypoint2D{};
+
                 if (telecentric) {
                     // Telecentric reprojection
                     auto reproj = red_math::projectPointTelecentric(
@@ -381,9 +393,10 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                                reproj(1);
                     if (x > 0 && x < scene->image_width[view_idx] && y > 0 &&
                         y < scene->image_height[view_idx]) {
-                        fa.cameras[view_idx].keypoints[node].x = x;
-                        fa.cameras[view_idx].keypoints[node].y = y;
-                        fa.cameras[view_idx].keypoints[node].labeled = true;
+                        kp2d.x = x;
+                        kp2d.y = y;
+                        kp2d.labeled = true;
+                        kp2d.projected = !user_annotated;
                     }
                 } else {
                     // Perspective reprojection (matrix-based, safe for det(R)=-1)
@@ -402,9 +415,10 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                                    reproj(1);
                         if (x > 0 && x < scene->image_width[view_idx] &&
                             y > 0 && y < scene->image_height[view_idx]) {
-                            fa.cameras[view_idx].keypoints[node].x = x;
-                            fa.cameras[view_idx].keypoints[node].y = y;
-                            fa.cameras[view_idx].keypoints[node].labeled = true;
+                            kp2d.x = x;
+                            kp2d.y = y;
+                            kp2d.labeled = true;
+                            kp2d.projected = !user_annotated;
                         }
                     }
                 }

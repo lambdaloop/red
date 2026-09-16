@@ -36,7 +36,7 @@ namespace {
 
 // Which of the two sessions (§2.6) a point belongs to. The partition is per
 // *point*, not per frame: red lets a frame hold hand-placed keypoints in one
-// camera and predicted ones in another.
+// camera and projected/predicted ones in another.
 enum class Bucket { Annotated, Tracked };
 
 // `Imported` is machine output, not a third category. Nothing in red imports
@@ -53,6 +53,12 @@ Bucket bucket_2d(LabelSource s) {
     case LabelSource::Imported:  return Bucket::Tracked;
     }
     return Bucket::Annotated;
+}
+
+Bucket bucket_2d(const Keypoint2D &kp) {
+    // A projection is derived data even when it filled an initially empty
+    // Keypoint2D whose legacy source field is still Manual.
+    return kp.projected ? Bucket::Tracked : bucket_2d(kp.source);
 }
 
 Bucket bucket_3d(Kp3DSource s) {
@@ -193,7 +199,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
       for (const FrameAnnotation &fa : fis) {
         for (const auto &cam : fa.cameras)
             for (const auto &kp : cam.keypoints)
-                if (kp.labeled) has[(int)bucket_2d(kp.source)] = true;
+                if (kp.labeled) has[(int)bucket_2d(kp)] = true;
         for (const auto &k3 : fa.kp3d) {
             if (k3.source == Kp3DSource::None) continue;
             if (cfg.layers == ExportConfig::Layers::TwoD) continue;
@@ -270,9 +276,9 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         }
 
         // ── keypoints.pq ──
-        // Every point red exports is `projected`: red records placement, not
-        // visibility, and §7 is explicit that labels which assert nothing about
-        // occlusion must not be written as `visible`.
+        // Red keeps user annotations as `visible` and marks 2D values filled
+        // from a triangulated 3D point as `projected`. Both are placements, not
+        // occlusion claims.
         {
             arrow::StringDictionary32Builder g_b, a_b, c_b, p_b, s_b;
             arrow::Int32Builder f_b;
@@ -299,12 +305,13 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                         const Keypoint2D &kp = cam.keypoints[ni];
                         if (!kp.labeled) continue;   // no row, not `unlabeled` (§7)
                         if (cfg.force_labels.empty() &&
-                            bucket_2d(kp.source) != job.b) continue;
+                            bucket_2d(kp) != job.b) continue;
                         if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
                             !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
                             !c_b.Append(cfg.camera_names[ci]).ok() ||
                             !p_b.Append(cfg.node_names[ni]).ok() ||
-                            !s_b.Append(Tailcycle::status::kProjected).ok() ||
+                            !s_b.Append(kp.projected ? Tailcycle::status::kProjected
+                                                       : Tailcycle::status::kVisible).ok() ||
                             !x_b.Append((float)kp.x).ok() ||
                             !y_b.Append((float)(img_h - kp.y)).ok())
                             return fail("keypoints.pq: builder append failed.");

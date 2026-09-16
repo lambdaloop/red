@@ -608,7 +608,13 @@ inline void DrawLabelingToolWindow(
             // Reserve space for rotated "Timeline" label on the left
             float label_font = ImGui::GetFontSize();
             float label_margin = label_font + 6.0f;
-            float timeline_w = ImGui::GetContentRegionAvail().x - label_margin;
+            // SameLine() inserts ItemSpacing after the rotated-label Dummy.
+            // Leave that spacing out of the plot width; otherwise the plot
+            // extends past the content region, most noticeably when this
+            // window is stretched to the full screen width.
+            float timeline_w = ImMax(
+                1.0f, ImGui::GetContentRegionAvail().x - label_margin -
+                          ImGui::GetStyle().ItemSpacing.x);
             float timeline_h = 60.0f;
 
             // Draw rotated "Timeline" label on the left

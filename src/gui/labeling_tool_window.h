@@ -688,7 +688,13 @@ inline void DrawLabelingToolWindow(
                 ImPlot::SetupAxes("frame number", nullptr, x_flags, y_flags);
                 ImPlot::SetupAxisLimits(ImAxis_X1, x_lo, x_hi, ImPlotCond_Once);
                 ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 1, ImPlotCond_Always);
-                ImPlot::SetupAxisZoomConstraints(ImAxis_X1, 50, x_hi - x_lo);
+                // A short recording can have fewer than the old 50-frame
+                // minimum zoom. Passing min_zoom > max_zoom makes ImPlot's
+                // constraint correction alternate between the requested range
+                // and the expanded range every frame.
+                const double x_span = x_hi - x_lo;
+                ImPlot::SetupAxisZoomConstraints(
+                    ImAxis_X1, ImMin(50.0, x_span), x_span);
 
                 // Ticks, widened by rarity. At 8000 frames across ~250px a
                 // frame is 0.03px, so the one that is still yellow among 7999
@@ -709,6 +715,14 @@ inline void DrawLabelingToolWindow(
                     "##gap", "##bbox", "##obb"};
                 for (int c = 0; c < kNumClasses; c++)
                     series[c] = {kIds[c], &class_x[c], classes[c].color};
+                auto timeline_line_spec = [](const ImVec4 &color, float weight) {
+                    ImPlotSpec spec = red_line_spec(color, weight);
+                    // The x limits are explicitly owned by this minimap. Do
+                    // not let PlotInfLines' fitter replace them with the data
+                    // bounds, which makes the whole bar jump as items change.
+                    spec.Flags |= ImPlotItemFlags_NoFit;
+                    return spec;
+                };
                 std::stable_sort(
                     std::begin(series), std::end(series),
                     [](const Series &a, const Series &b) {
@@ -719,14 +733,14 @@ inline void DrawLabelingToolWindow(
                     const float w = ImClamp(
                         timeline_w * 0.25f / (float)sr.xs->size(), 2.0f, 10.0f);
                     ImPlot::PlotInfLines(sr.id, sr.xs->data(), (int)sr.xs->size(),
-                                         red_line_spec(*sr.color, w));
+                                         timeline_line_spec(*sr.color, w));
                 }
 
                 // Current frame indicator, drawn last so it stays visible
                 // over a widened tick.
                 double cf = (double)current_frame_num;
                 ImPlot::PlotInfLines("##current", &cf, 1,
-                                     red_line_spec(ImVec4(1, 1, 1, 0.6f), 1.5f));
+                                     timeline_line_spec(ImVec4(1, 1, 1, 0.6f), 1.5f));
 
                 // Double-click to reset to full video range
                 if (ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(0))

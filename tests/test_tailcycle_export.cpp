@@ -153,7 +153,9 @@ static AnnotationMap make_annotations(u32 first_frame = 0) {
                 kp.y = 200.0 + c;
                 kp.labeled = true;
                 kp.source = (i == 4) ? LabelSource::Predicted : LabelSource::Manual;
-                kp.projected = (i == 4);
+                // A refreshed manual observation may have projected
+                // coordinates, but it must still export as visible.
+                kp.projected = (i == 4) || (i == 0 && c == 1 && n == 0);
                 if (i == 4) kp.confidence = 0.75f;
             }
         fa.kp3d[0].x = 1; fa.kp3d[0].y = 2; fa.kp3d[0].z = 3;

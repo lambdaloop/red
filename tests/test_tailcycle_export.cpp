@@ -267,12 +267,31 @@ int main(int argc, char **argv) {
             std::ofstream f(A / "calibration.toml");
             f << cropped_calib;
         }
+        // Tailcycle also permits each skeleton entry to be a polyline. The
+        // importer should connect consecutive names without crossing paths,
+        // and collapse the repeated-anchor reverse edge.
+        {
+            std::string session = slurp(A / "session.toml");
+            CHECK(replace_once(
+                      session,
+                      "skeleton = [ [ \"Snout\", \"EarL\",], [ \"Snout\", \"TailBase\",],]",
+                      "skeleton = [\n"
+                      " [ \"Snout\", \"EarL\", \"Snout\",],\n"
+                      " [ \"Snout\", \"TailBase\",],\n"
+                      "]"),
+                  "polyline skeleton fixture written");
+            std::ofstream f(A / "session.toml");
+            f << session;
+        }
         TailcycleImport::Session imported;
         TailcycleImport::ImportStats ist;
         std::string import_status;
         CHECK(TailcycleImport::read_session(A.string(), "sess1", &imported, &ist,
                                             &import_status),
               "cropped calibration imports: " + import_status);
+        const std::vector<std::pair<int, int>> expected_edges{{0, 1}, {0, 2}};
+        CHECK(imported.edges == expected_edges,
+              "polyline skeleton imports as unique consecutive edges");
         CHECK(imported.calibration.size() == NC, "all cropped cameras import");
         CHECK(imported.calibration.size() == NC &&
               std::abs(imported.calibration[0].k(0, 2) - 640.0) < 1e-9 &&

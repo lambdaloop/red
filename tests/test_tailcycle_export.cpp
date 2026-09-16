@@ -368,6 +368,46 @@ int main(int argc, char **argv) {
               "the forced label is written");
     }
 
+    // ── 3e. in-place saves replace label tables without creating a sibling ──
+    {
+        const std::string out = root + "/t3e";
+        auto cfg = make_config(out);
+        cfg.source_frame_start = 100;
+        cfg.force_labels = "annotated";
+        cfg.layers = TailcycleExport::ExportConfig::Layers::TwoDAndThreeD;
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, make_annotations(100), &st, &status),
+              "initial in-place fixture export succeeds: " + status);
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        CHECK(fs::exists(d / "keypoints.pq"), "in-place fixture has keypoints.pq");
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &imported, &ist,
+                                            &status),
+              "in-place fixture imports: " + status);
+        AnnotationMap amap = imported.annotations;
+        amap.at(0).front().cameras[0].keypoints[0].x = 777.0;
+        // Imported annotations are rebased to group-local frames, as they are
+        // in the GUI. The save path must not apply source_frame_start twice.
+        cfg.source_frame_start = 0;
+        cfg.in_place = true;
+        st = {};
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "in-place overwrite succeeds: " + status);
+        auto k = read_pq(d / "keypoints.pq");
+        bool found = false;
+        for (int64_t r = 0; k && r < k->num_rows(); r++) {
+            if (int_at(k, "frame", r) == 0 && dict_at(k, "camera", r) == "camA" &&
+                dict_at(k, "bodypart", r) == "Snout") {
+                auto col = k->GetColumnByName("x");
+                auto arr = std::static_pointer_cast<arrow::FloatArray>(col->chunk(0));
+                found = std::abs(arr->Value(r) - 777.0f) < 0.01f;
+            }
+        }
+        CHECK(found, "in-place overwrite replaces the existing label table");
+    }
+
     // ── 3d. every animal gets its own animal_id ──
     // The row key is (group, frame, animal, camera, bodypart). A shared id
     // makes rows collide, and a reader keeping the last per key silently keeps

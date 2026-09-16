@@ -349,6 +349,7 @@ inline bool load_2d_csv(const std::string &path, AnnotationMap &amap,
                 cam.keypoints[k].x = x;
                 cam.keypoints[k].y = y;
                 cam.keypoints[k].labeled = true;
+                cam.keypoints[k].projected = false;
                 cam.keypoints[k].confidence = has_c ? (float)c : 0.0f;
                 if (src == 'P') cam.keypoints[k].source = LabelSource::Predicted;
                 else if (src == 'I') cam.keypoints[k].source = LabelSource::Imported;

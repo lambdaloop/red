@@ -153,6 +153,7 @@ inline std::string jarvis_import_to_labels(
                     kp2d.x = px; kp2d.y = py; kp2d.labeled = true;
                     kp2d.confidence = c;
                     kp2d.source = LabelSource::Predicted;
+                    kp2d.projected = true;
                 }
             }
         }

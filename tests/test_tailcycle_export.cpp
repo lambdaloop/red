@@ -10,6 +10,7 @@
 #include "annotation.h"
 #include "camera.h"
 #include "tailcycle_export.h"
+#include "tailcycle_import.h"
 
 #include <filesystem>
 #include <fstream>
@@ -95,6 +96,14 @@ static int32_t int_at(const std::shared_ptr<arrow::Table> &t, const char *name,
 static std::string slurp(const fs::path &p) {
     std::ifstream f(p);
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+static bool replace_once(std::string &text, const std::string &from,
+                         const std::string &to) {
+    const size_t p = text.find(from);
+    if (p == std::string::npos) return false;
+    text.replace(p, from.size(), to);
+    return true;
 }
 
 // ── fixture ──────────────────────────────────────────────────────────────────
@@ -238,6 +247,47 @@ int main(int argc, char **argv) {
         // frames (see the header).
         CHECK(fs::is_directory(A / "groups" / "sess1"), "group folder created");
         CHECK(fs::is_empty(A / "groups" / "sess1"), "group folder left for the caller to fill");
+
+        // Tailcycle stores crop-local labels but sensor-coordinate intrinsics.
+        // Simulate a cropped source by adding an offset and restoring the
+        // sensor-space principal point in the exported calibration; import
+        // must normalize it back to red's stored-image calibration.
+        std::string cropped_calib = slurp(A / "calibration.toml");
+        CHECK(replace_once(cropped_calib,
+                           "matrix = [ [ 1000,0,640,], [ 0,1000,480,], [ 0,0,1,],]",
+                           "matrix = [ [ 1000,0,760,], [ 0,1000,620,], [ 0,0,1,],]"),
+              "crop fixture restores sensor-space principal point");
+        CHECK(replace_once(cropped_calib, "offset = [ 0.0, 0.0,]",
+                           "offset = [ 120, 140,]"),
+              "crop fixture writes a non-zero offset");
+        {
+            std::ofstream f(A / "calibration.toml");
+            f << cropped_calib;
+        }
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        std::string import_status;
+        CHECK(TailcycleImport::read_session(A.string(), "sess1", &imported, &ist,
+                                            &import_status),
+              "cropped calibration imports: " + import_status);
+        CHECK(imported.calibration.size() == NC, "all cropped cameras import");
+        CHECK(imported.calibration.size() == NC &&
+              std::abs(imported.calibration[0].k(0, 2) - 640.0) < 1e-9 &&
+              std::abs(imported.calibration[0].k(1, 2) - 480.0) < 1e-9,
+              "crop offset is folded into the principal point");
+        CHECK(imported.calibration.size() == NC &&
+              (imported.calibration[0].projection_mat -
+               red_math::projectionFromKRt(imported.calibration[0].k,
+                                           imported.calibration[0].r,
+                                           imported.calibration[0].tvec)).norm() < 1e-9,
+              "projection matrix uses the crop-normalized calibration");
+        CHECK(ist.keypoint_rows == 22, "cropped import keeps crop-local keypoint rows");
+        const auto frame0 = imported.annotations.find(0);
+        CHECK(frame0 != imported.annotations.end() && !frame0->second.empty() &&
+              frame0->second.front().cameras.size() == NC &&
+              std::abs(frame0->second.front().cameras[0].keypoints[0].x - 100.0) < 1e-6 &&
+              std::abs(frame0->second.front().cameras[0].keypoints[0].y - 200.0) < 1e-6,
+              "crop offset does not shift crop-local keypoint labels");
     }
 
     // ── 2. an unlabelled point writes no row at all ──

@@ -354,6 +354,8 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                 }
             }
 
+            // Always solve from the current 2D observations, even if this
+            // keypoint already has a triangulated 3D value.
             Eigen::Vector3d pt3d =
                 red_math::triangulatePoints(undist_pts, proj_mats);
 

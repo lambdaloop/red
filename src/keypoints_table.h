@@ -203,6 +203,8 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                 const bool user_annotated =
                                     labeled && fa.cameras[row].keypoints[node].source ==
                                                    LabelSource::Manual;
+                                const bool projected =
+                                    labeled && fa.cameras[row].keypoints[node].projected;
                                 ImVec4 node_color = ImVec4(0, 0, 0, 0);
 
                                 // Fill shows placement status regardless of
@@ -213,16 +215,12 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                 if (labeled) {
                                     node_color =
                                         skeleton.node_colors[node];
-                                    node_color.w = 0.9f;
+                                    node_color.w = projected ? 0.5f : 0.9f;
                                 } else if (kc.is_selected(node)) {
                                     // Selected but empty: tint so the selection
                                     // is visible in the body too.
                                     node_color = sel_fill;
                                 }
-
-                                const bool triangulated =
-                                    node < (int)fa.kp3d.size() &&
-                                    fa.kp3d[node].triangulated;
 
                                 // The whole cell is a click target: clicking
                                 // sets this keypoint active for this camera view.
@@ -271,18 +269,13 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                                 user_annotated ? "user annotated" : "projected from 3D");
                                     }
                                 }
-                                // T marks a triangulated user observation in
-                                // this camera. P marks a projected value; this
-                                // keeps the distinction per camera instead of
-                                // repeating the global 3D state everywhere.
-                                if (triangulated && user_annotated)
+                                // Keep the legacy T marker, but make it
+                                // per-camera: it marks a value projected from
+                                // 3D, while a manually annotated view has no T.
+                                if (projected)
                                     ImGui::GetWindowDrawList()->AddText(
                                         ImVec2(p0.x + 2.0f, p0.y),
                                         IM_COL32(255, 255, 255, 255), "T");
-                                if (labeled && !user_annotated)
-                                    ImGui::GetWindowDrawList()->AddText(
-                                        ImVec2(p0.x + 12.0f, p0.y),
-                                        IM_COL32(255, 255, 255, 255), "P");
                                 ImGui::PopID();
 
                                 ImU32 cell_bg_color =

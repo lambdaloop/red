@@ -101,6 +101,7 @@ inline void write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &
             kp.y = py;
             kp.labeled = true;
             kp.source = LabelSource::Predicted;
+            kp.projected = true;
         }
     }
 }

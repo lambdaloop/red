@@ -41,6 +41,10 @@ struct Keypoint2D {
     bool   labeled    = false;
     float  confidence = 0.0f;
     LabelSource source = LabelSource::Manual;
+    // True when this camera's value is a derived projection rather than a
+    // user observation. A projection refresh keeps false for a camera that
+    // already had a user annotation, so its Tailcycle status remains visible.
+    bool projected = false;
 };
 
 // ── 3D label provenance ──
@@ -322,7 +326,8 @@ inline bool frame_has_any_manual_labels(const FrameAnnotation &fa) {
     // hand-made data is caught by the 2D pass below or by needs_improvement.
     for (const auto &cam : fa.cameras)
         for (const auto &kp : cam.keypoints)
-            if (kp.labeled && kp.source == LabelSource::Manual) return true;
+            if (kp.labeled && !kp.projected &&
+                kp.source == LabelSource::Manual) return true;
     return false;
 }
 

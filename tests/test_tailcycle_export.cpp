@@ -153,6 +153,7 @@ static AnnotationMap make_annotations(u32 first_frame = 0) {
                 kp.y = 200.0 + c;
                 kp.labeled = true;
                 kp.source = (i == 4) ? LabelSource::Predicted : LabelSource::Manual;
+                kp.projected = (i == 4);
                 if (i == 4) kp.confidence = 0.75f;
             }
         fa.kp3d[0].x = 1; fa.kp3d[0].y = 2; fa.kp3d[0].z = 3;
@@ -193,8 +194,8 @@ int main(int argc, char **argv) {
         CHECK(ka != nullptr, "annotated keypoints.pq is readable");
         // 4 frames x 2 cameras x 3 nodes, less the 2 unlabelled
         CHECK(ka && ka->num_rows() == 22, "annotated 2D row count");
-        CHECK(dict_values(ka, "status") == std::set<std::string>{"projected"},
-              "red has no occlusion channel, so every point is `projected`");
+        CHECK(dict_values(ka, "status") == std::set<std::string>{"visible"},
+              "user-annotated points are exported as `visible`");
         CHECK(!has_column(ka, "score"),
               "score column omitted entirely when every label is hand-placed");
 
@@ -217,6 +218,8 @@ int main(int argc, char **argv) {
 
         auto kt = read_pq(T / "keypoints.pq");
         CHECK(kt && kt->num_rows() == 6, "tracked 2D row count");
+        CHECK(dict_values(kt, "status") == std::set<std::string>{"projected"},
+              "triangulated/projected points are exported as `projected`");
         CHECK(has_column(kt, "score"), "predicted points carry a score");
 
         // The default writes the 2D layer only, so neither session carries 3D.

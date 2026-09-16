@@ -1234,6 +1234,7 @@ int main(int argc, char **argv) {
                                         kp2d.x = mouse.x;
                                         kp2d.y = mouse.y;
                                         kp2d.labeled = true;
+                                        kp2d.source = LabelSource::Manual;
                                         kp2d.projected = false;
                                         // Moving a 2D point invalidates the 3D
                                         // solved from it. Dragging already did

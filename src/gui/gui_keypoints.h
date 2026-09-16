@@ -73,6 +73,7 @@ inline bool gui_plot_keypoints(FrameAnnotation &fa, SkeletonContext *skeleton,
                 &drag_point_hovered);
             if (drag_point_modified) {
                 // A drag turns a projected point back into a user annotation.
+                cam.keypoints[node].source = LabelSource::Manual;
                 cam.keypoints[node].projected = false;
                 fa.kp3d[node].clear();
                 touched = true;
@@ -347,7 +348,7 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
             if (view_idx < (u32)fa.cameras.size() &&
                 node < (u32)fa.cameras[view_idx].keypoints.size() &&
                 fa.cameras[view_idx].keypoints[node].labeled &&
-                !fa.cameras[view_idx].keypoints[node].projected) {
+                fa.cameras[view_idx].keypoints[node].source == LabelSource::Manual) {
                 num_views_labeled++;
             }
         }
@@ -361,7 +362,7 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                 if (view_idx >= (u32)fa.cameras.size()) continue;
                 if (node >= (u32)fa.cameras[view_idx].keypoints.size()) continue;
                 if (fa.cameras[view_idx].keypoints[node].labeled &&
-                    !fa.cameras[view_idx].keypoints[node].projected) {
+                    fa.cameras[view_idx].keypoints[node].source == LabelSource::Manual) {
                     Eigen::Vector2d pt(
                         fa.cameras[view_idx].keypoints[node].x,
                         (double)scene->image_height[view_idx] -
@@ -400,10 +401,12 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                 if (node >= (u32)fa.cameras[view_idx].keypoints.size()) continue;
 
                 // Refresh every camera's coordinates, but retain the visible
-                // status of a point that was explicitly user-annotated. Only
-                // missing/previously projected points become `projected`.
+                // status of a point that was explicitly user-annotated. A
+                // refreshed user annotation remains visible; derived values
+                // are marked projected and are excluded from the next solve.
                 auto &kp2d = fa.cameras[view_idx].keypoints[node];
-                const bool user_annotated = kp2d.labeled && !kp2d.projected;
+                const bool user_annotated =
+                    kp2d.labeled && kp2d.source == LabelSource::Manual;
                 if (!user_annotated) kp2d = Keypoint2D{};
 
                 if (telecentric) {
@@ -422,7 +425,9 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                         kp2d.x = x;
                         kp2d.y = y;
                         kp2d.labeled = true;
-                        kp2d.projected = !user_annotated;
+                        kp2d.source = user_annotated ? LabelSource::Manual
+                                                      : LabelSource::Predicted;
+                        kp2d.projected = true;
                     }
                 } else {
                     // Perspective reprojection (matrix-based, safe for det(R)=-1)
@@ -444,7 +449,9 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                             kp2d.x = x;
                             kp2d.y = y;
                             kp2d.labeled = true;
-                            kp2d.projected = !user_annotated;
+                            kp2d.source = user_annotated ? LabelSource::Manual
+                                                          : LabelSource::Predicted;
+                            kp2d.projected = true;
                         }
                     }
                 }

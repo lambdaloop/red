@@ -200,6 +200,9 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                     row < (int)fa.cameras.size() &&
                                     node < (int)fa.cameras[row].keypoints.size() &&
                                     fa.cameras[row].keypoints[node].labeled;
+                                const bool user_annotated =
+                                    labeled && fa.cameras[row].keypoints[node].source ==
+                                                   LabelSource::Manual;
                                 ImVec4 node_color = ImVec4(0, 0, 0, 0);
 
                                 // Fill shows placement status regardless of
@@ -253,24 +256,33 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                         row < (int)pm.camera_names.size()) {
                                         if (kc.count() >= 2)
                                             ImGui::SetTooltip(
-                                                "%s / %s\n"
+                                                "%s / %s\n%s\n"
                                                 "Click: set active   Delete: remove selected set (%d)",
                                                 pm.camera_names[row].c_str(),
                                                 skeleton.node_names[node].c_str(),
+                                                user_annotated ? "user annotated" : "projected from 3D",
                                                 kc.count());
                                         else
                                             ImGui::SetTooltip(
-                                                "%s / %s\n"
+                                                "%s / %s\n%s\n"
                                                 "Click: set active   Delete: remove from this camera",
                                                 pm.camera_names[row].c_str(),
-                                                skeleton.node_names[node].c_str());
+                                                skeleton.node_names[node].c_str(),
+                                                user_annotated ? "user annotated" : "projected from 3D");
                                     }
                                 }
-                                // Triangulated marker, drawn over the cell.
-                                if (triangulated)
+                                // T marks a triangulated user observation in
+                                // this camera. P marks a projected value; this
+                                // keeps the distinction per camera instead of
+                                // repeating the global 3D state everywhere.
+                                if (triangulated && user_annotated)
                                     ImGui::GetWindowDrawList()->AddText(
                                         ImVec2(p0.x + 2.0f, p0.y),
                                         IM_COL32(255, 255, 255, 255), "T");
+                                if (labeled && !user_annotated)
+                                    ImGui::GetWindowDrawList()->AddText(
+                                        ImVec2(p0.x + 12.0f, p0.y),
+                                        IM_COL32(255, 255, 255, 255), "P");
                                 ImGui::PopID();
 
                                 ImU32 cell_bg_color =

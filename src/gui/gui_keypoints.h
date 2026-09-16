@@ -49,11 +49,11 @@ inline bool gui_plot_keypoints(FrameAnnotation &fa, SkeletonContext *skeleton,
             ImVec4 node_color;
             if (cam.active_id == node) {
                 node_color = active_color; // active keypoint: user-selected color
-                node_color.w = 0.9;
+                node_color.w = cam.keypoints[node].projected ? 0.55f : 0.9f;
                 pt_size = 8.0f;
             } else {
                 node_color = skeleton->node_colors.at(node);
-                node_color.w = 0.9;
+                node_color.w = cam.keypoints[node].projected ? 0.55f : 0.9f;
                 pt_size = 6.0f;
             }
             // Tint by animal, and dim the ones that are not being edited.
@@ -401,7 +401,9 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                         kp2d.labeled = true;
                         kp2d.source = user_annotated ? LabelSource::Manual
                                                       : LabelSource::Predicted;
-                        kp2d.projected = true;
+                        // A T-key refresh may move a user annotation, but it
+                        // must not turn that camera into a derived label.
+                        kp2d.projected = !user_annotated;
                     }
                 } else {
                     // Perspective reprojection (matrix-based, safe for det(R)=-1)
@@ -425,7 +427,9 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                             kp2d.labeled = true;
                             kp2d.source = user_annotated ? LabelSource::Manual
                                                           : LabelSource::Predicted;
-                            kp2d.projected = true;
+                            // Preserve the per-camera user annotation state
+                            // even though T refreshed its coordinates.
+                            kp2d.projected = !user_annotated;
                         }
                     }
                 }

@@ -10,6 +10,7 @@
 #include "annotation.h"
 #include "camera.h"
 #include "tailcycle_export.h"
+#include "tailcycle_import.h"
 
 #include <filesystem>
 #include <fstream>

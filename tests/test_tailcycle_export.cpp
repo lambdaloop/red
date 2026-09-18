@@ -259,6 +259,62 @@ int main(int argc, char **argv) {
         CHECK(found == 0, "unlabelled writes no row, rather than an `unlabeled` row");
     }
 
+    // ── 2b. all keypoint visibility statuses round-trip ──
+    {
+        const std::string out = root + "/t2b";
+        auto cfg = make_config(out);
+        cfg.force_labels = "annotated";  // keep both visibility statuses together
+        AnnotationMap amap;
+        FrameAnnotation fa = make_frame(NN, NC, 0);
+
+        auto &visible = fa.cameras[0].keypoints[0];
+        visible.x = 11.0; visible.y = 22.0; visible.labeled = true;
+        visible.source = LabelSource::Manual;
+
+        auto &projected = fa.cameras[0].keypoints[1];
+        projected.x = 33.0; projected.y = 44.0; projected.labeled = true;
+        projected.source = LabelSource::Predicted;
+        projected.projected = true;
+
+        mark_keypoint2d_occluded(fa.cameras[0].keypoints[2]);
+        amap[0] = FrameInstances{std::move(fa)};
+
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "all-status export succeeds: " + status);
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        auto k = read_pq(d / "keypoints.pq");
+        CHECK(k && k->num_rows() == 3, "visible/projected/missing write rows");
+        CHECK((k && dict_values(k, "status") ==
+                       std::set<std::string>{"visible", "projected", "missing"}),
+              "visible/projected/missing are exported");
+
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &imported, &ist,
+                                            &status),
+              "all-status import succeeds: " + status);
+        const auto fit = imported.annotations.find(0);
+        CHECK(fit != imported.annotations.end() && !fit->second.empty(),
+              "all-status import retains the frame");
+        if (fit != imported.annotations.end() && !fit->second.empty()) {
+            const auto &if0 = fit->second.front();
+            CHECK(if0.cameras[0].keypoints[0].labeled &&
+                  !if0.cameras[0].keypoints[0].occluded &&
+                  std::abs(if0.cameras[0].keypoints[0].x - 11.0) < 1e-6,
+                  "visible imports as a labeled point");
+            CHECK(if0.cameras[0].keypoints[1].labeled &&
+                  if0.cameras[0].keypoints[1].projected,
+                  "projected imports as a projected point");
+            CHECK(!if0.cameras[0].keypoints[2].labeled &&
+                  if0.cameras[0].keypoints[2].occluded,
+                  "missing imports as an occluded point");
+            CHECK(!if0.cameras[1].keypoints[0].labeled,
+                  "unlabeled remains the default empty point");
+        }
+    }
+
     // ── 3. asking for the 3D layer brings the derived solve back ──
     {
         const std::string out = root + "/t3";

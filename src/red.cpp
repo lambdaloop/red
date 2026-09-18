@@ -788,6 +788,7 @@ int main(int argc, char **argv) {
                                                 px, py)) {
                             auto &kp2d = fa.cameras[cam].keypoints[k];
                             kp2d.x = px; kp2d.y = py; kp2d.labeled = true;
+                            kp2d.occluded = false;
                             kp2d.confidence = c;
                             kp2d.source = LabelSource::Predicted;
                             kp2d.projected = true;
@@ -1218,6 +1219,7 @@ int main(int argc, char **argv) {
                                         kp2d.x = mouse.x;
                                         kp2d.y = mouse.y;
                                         kp2d.labeled = true;
+                                        kp2d.occluded = false;
                                         kp2d.source = LabelSource::Manual;
                                         kp2d.projected = false;
                                         // Moving a 2D point invalidates the 3D
@@ -1225,6 +1227,23 @@ int main(int argc, char **argv) {
                                         // this (gui_keypoints); placing did
                                         // not, so the old point kept its "T"
                                         // and its coordinates.
+                                        fa.kp3d[*kp].clear();
+                                        if (*kp < (skeleton.num_nodes - 1)) {
+                                            (*kp)++;
+                                        }
+                                    }
+
+                                    // Mark the active keypoint as assessed but
+                                    // not visible in this camera. Missing
+                                    // points have no coordinates, so this is
+                                    // intentionally tied to the active node,
+                                    // not to hovering an existing point.
+                                    if (keys::pressed(keys::Sc::MarkOccluded)) {
+                                        auto &fa = instance_or_first(
+                                            annotations.at(current_frame_num),
+                                            active_instance);
+                                        auto &kp2d = fa.cameras[j].keypoints[*kp];
+                                        mark_keypoint2d_occluded(kp2d);
                                         fa.kp3d[*kp].clear();
                                         if (*kp < (skeleton.num_nodes - 1)) {
                                             (*kp)++;

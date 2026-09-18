@@ -491,8 +491,12 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
             kp.labeled = true;
             kp.occluded = false;
             kp.projected = (s == Tailcycle::status::kProjected);
+            // `status` is the per-point truth. A visible row remains a
+            // visible/manual observation even when it came from a session
+            // declared `tracked`; the session label must not turn it into a
+            // projected row on the next export.
             kp.source = kp.projected ? LabelSource::Predicted
-                                      : session_source;
+                                      : LabelSource::Manual;
             if (sc.ok && i < sc.null.size() && !sc.null[i]) kp.confidence = (float)sc.vals[i];
             st.keypoint_rows++;
         }

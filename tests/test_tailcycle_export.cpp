@@ -384,6 +384,42 @@ int main(int argc, char **argv) {
         }
     }
 
+    // ── 2c. a tracked session can still contain visible observations ──
+    // The session-level labels field must not turn visible rows into
+    // projected rows when the imported session is saved back in place.
+    {
+        const std::string out = root + "/t2c";
+        auto cfg = make_config(out);
+        cfg.force_labels = "tracked";
+        AnnotationMap amap;
+        FrameAnnotation fa = make_frame(NN, NC, 0);
+        auto &kp = fa.cameras[0].keypoints[0];
+        kp.x = 12.0; kp.y = 23.0; kp.labeled = true;
+        kp.source = LabelSource::Manual;
+        amap[0] = FrameInstances{std::move(fa)};
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "tracked visible export succeeds: " + status);
+
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &imported, &ist,
+                                            &status),
+              "tracked visible import succeeds: " + status);
+        CHECK(imported.annotations.at(0).front().cameras[0].keypoints[0].source ==
+                  LabelSource::Manual,
+              "tracked session preserves visible provenance");
+
+        cfg.in_place = true;
+        CHECK(TailcycleExport::export_session(cfg, imported.annotations, &st, &status),
+              "tracked visible in-place round trip succeeds: " + status);
+        auto k = read_pq(d / "keypoints.pq");
+        CHECK((k && dict_values(k, "status") == std::set<std::string>{"visible"}),
+              "tracked visible row remains visible after round trip");
+    }
+
     // ── 3. asking for the 3D layer brings the derived solve back ──
     {
         const std::string out = root + "/t3";

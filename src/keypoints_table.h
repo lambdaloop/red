@@ -200,6 +200,10 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                     row < (int)fa.cameras.size() &&
                                     node < (int)fa.cameras[row].keypoints.size() &&
                                     fa.cameras[row].keypoints[node].labeled;
+                                const bool occluded =
+                                    row < (int)fa.cameras.size() &&
+                                    node < (int)fa.cameras[row].keypoints.size() &&
+                                    fa.cameras[row].keypoints[node].occluded;
                                 const bool user_annotated =
                                     labeled && fa.cameras[row].keypoints[node].source ==
                                                    LabelSource::Manual;
@@ -216,6 +220,8 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                     node_color =
                                         skeleton.node_colors[node];
                                     node_color.w = projected ? 0.5f : 0.9f;
+                                } else if (occluded) {
+                                    node_color = ImVec4(0.85f, 0.25f, 0.25f, 0.9f);
                                 } else if (kc.is_selected(node)) {
                                     // Selected but empty: tint so the selection
                                     // is visible in the body too.
@@ -258,7 +264,8 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                                 "Click: set active   Delete: remove selected set (%d)",
                                                 pm.camera_names[row].c_str(),
                                                 skeleton.node_names[node].c_str(),
-                                                user_annotated ? "user annotated" : "projected from 3D",
+                                                occluded ? "occluded / outside frame" :
+                                                (user_annotated ? "user annotated" : "projected from 3D"),
                                                 kc.count());
                                         else
                                             ImGui::SetTooltip(
@@ -266,7 +273,8 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                                 "Click: set active   Delete: remove from this camera",
                                                 pm.camera_names[row].c_str(),
                                                 skeleton.node_names[node].c_str(),
-                                                user_annotated ? "user annotated" : "projected from 3D");
+                                                occluded ? "occluded / outside frame" :
+                                                (user_annotated ? "user annotated" : "projected from 3D"));
                                     }
                                 }
                                 // Keep the legacy T marker, but make it
@@ -276,6 +284,10 @@ inline void DrawKeypointsTable(AppContext &ctx, float height) {
                                     ImGui::GetWindowDrawList()->AddText(
                                         ImVec2(p0.x + 2.0f, p0.y),
                                         IM_COL32(255, 255, 255, 255), "T");
+                                if (occluded)
+                                    ImGui::GetWindowDrawList()->AddText(
+                                        ImVec2(p0.x + 2.0f, p0.y),
+                                        IM_COL32(255, 120, 120, 255), "X");
                                 ImGui::PopID();
 
                                 ImU32 cell_bg_color =

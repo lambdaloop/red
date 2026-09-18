@@ -42,6 +42,7 @@ inline bool gui_plot_keypoints(FrameAnnotation &fa, SkeletonContext *skeleton,
     if (view_idx >= (int)fa.cameras.size()) return false;
     auto &cam = fa.cameras[view_idx];
     bool touched = false;
+    bool any_point_hovered = false;
 
     float pt_size = 6.0f;
     for (u32 node = 0; node < skeleton->num_nodes; node++) {
@@ -99,6 +100,7 @@ inline bool gui_plot_keypoints(FrameAnnotation &fa, SkeletonContext *skeleton,
             }
 
             if (drag_point_hovered) {
+                any_point_hovered = true;
                 std::string label;
                 if (node < skeleton->node_names.size())
                     label = skeleton->node_names[node];
@@ -142,6 +144,18 @@ inline bool gui_plot_keypoints(FrameAnnotation &fa, SkeletonContext *skeleton,
                 touched = true;
             }
         }
+    }
+
+    // R normally acts on a hovered point, but requiring the cursor to land on
+    // a small marker makes correcting the active node unnecessarily fiddly.
+    // When the plot is otherwise hovered, apply the same camera-local delete
+    // to the active node. Keep the hovered-point path above for compatibility
+    // with the existing gesture (and so R still activates that point first).
+    if (is_active && !any_point_hovered && ImPlot::IsPlotHovered() &&
+        !ImGui::GetIO().WantTextInput &&
+        ImGui::IsKeyPressed(ImGuiKey_R, false) &&
+        cam.active_id < cam.keypoints.size()) {
+        cam.keypoints[cam.active_id] = Keypoint2D{};
     }
 
     for (u32 edge = 0; edge < skeleton->num_edges; edge++) {
@@ -298,12 +312,14 @@ inline bool solve_midline_constraint(FrameAnnotation &fa,
             if (v == side) continue;
             if (v >= (int)fa.cameras.size()) continue;
             if (node >= (u32)fa.cameras[v].keypoints.size()) continue;
+            if (fa.cameras[v].keypoints[node].occluded) continue;
             double rx, ry;
             if (reproject_3d_to_cam(X, cp[v], scene->image_width[v],
                                     scene->image_height[v], rx, ry)) {
                 fa.cameras[v].keypoints[node].x = rx;
                 fa.cameras[v].keypoints[node].y = ry;
                 fa.cameras[v].keypoints[node].labeled = true;
+                fa.cameras[v].keypoints[node].occluded = false;
                 fa.cameras[v].keypoints[node].source = LabelSource::Predicted;
                 fa.cameras[v].keypoints[node].projected = true;
             }
@@ -405,6 +421,10 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                 // refreshed user annotation remains visible; derived values
                 // are marked projected and are excluded from the next solve.
                 auto &kp2d = fa.cameras[view_idx].keypoints[node];
+                // An explicit missing/occluded assessment is a visibility
+                // judgment, not an empty projected slot. Preserve it when a
+                // 3D solve refreshes the other cameras.
+                if (kp2d.occluded) continue;
                 const bool user_annotated =
                     kp2d.labeled && kp2d.source == LabelSource::Manual;
                 if (!user_annotated) kp2d = Keypoint2D{};
@@ -425,6 +445,7 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                         kp2d.x = x;
                         kp2d.y = y;
                         kp2d.labeled = true;
+                        kp2d.occluded = false;
                         kp2d.source = user_annotated ? LabelSource::Manual
                                                       : LabelSource::Predicted;
                         // A T-key refresh may move a user annotation, but it
@@ -451,6 +472,7 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
                             kp2d.x = x;
                             kp2d.y = y;
                             kp2d.labeled = true;
+                            kp2d.occluded = false;
                             kp2d.source = user_annotated ? LabelSource::Manual
                                                           : LabelSource::Predicted;
                             // Preserve the per-camera user annotation state

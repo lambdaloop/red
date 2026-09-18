@@ -153,9 +153,20 @@ inline bool gui_plot_keypoints(FrameAnnotation &fa, SkeletonContext *skeleton,
     // with the existing gesture (and so R still activates that point first).
     if (is_active && !any_point_hovered && ImPlot::IsPlotHovered() &&
         !ImGui::GetIO().WantTextInput &&
-        ImGui::IsKeyPressed(ImGuiKey_R, false) &&
         cam.active_id < cam.keypoints.size()) {
-        cam.keypoints[cam.active_id] = Keypoint2D{};
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+            cam.keypoints[cam.active_id] = Keypoint2D{};
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+            const u32 node = cam.active_id;
+            for (int cam_idx = 0; cam_idx < num_cams; cam_idx++) {
+                if (cam_idx >= (int)fa.cameras.size()) break;
+                if (node < fa.cameras[cam_idx].keypoints.size()) {
+                    fa.cameras[cam_idx].keypoints[node] = Keypoint2D{};
+                    fa.cameras[cam_idx].active_id = node;
+                }
+            }
+        }
     }
 
     for (u32 edge = 0; edge < skeleton->num_edges; edge++) {
@@ -360,16 +371,28 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
     for (u32 node = 0; node < skeleton->num_nodes; node++) {
 
         u32 num_views_labeled{0};
+        u32 num_views_available{0};
         for (u32 view_idx = 0; view_idx < scene->num_cams; view_idx++) {
             if (view_idx < (u32)fa.cameras.size() &&
-                node < (u32)fa.cameras[view_idx].keypoints.size() &&
-                fa.cameras[view_idx].keypoints[node].labeled &&
-                fa.cameras[view_idx].keypoints[node].source == LabelSource::Manual) {
-                num_views_labeled++;
+                node < (u32)fa.cameras[view_idx].keypoints.size()) {
+                const Keypoint2D &kp = fa.cameras[view_idx].keypoints[node];
+                // Missing/occluded is an explicit exclusion. A projected point
+                // is usable as a fallback observation only when there are no
+                // manual observations for this node at all.
+                if (kp.labeled && !kp.occluded) {
+                    num_views_available++;
+                    if (kp.source == LabelSource::Manual)
+                        num_views_labeled++;
+                }
             }
         }
 
-        if (num_views_labeled >= 2) {
+        // Normal labeling uses >=2 manual observations. If every available
+        // observation is projected/derived, still solve: this is useful for
+        // imported tailcycle/JARVIS data and uses all non-missing views.
+        const bool use_all_available = num_views_labeled == 0;
+        if (num_views_labeled >= 2 ||
+            (use_all_available && num_views_available >= 2)) {
 
             std::vector<Eigen::Vector2d> undist_pts;
             std::vector<Eigen::Matrix<double, 3, 4>> proj_mats;
@@ -377,8 +400,9 @@ inline void reprojection(FrameAnnotation &fa, SkeletonContext *skeleton,
             for (u32 view_idx = 0; view_idx < scene->num_cams; view_idx++) {
                 if (view_idx >= (u32)fa.cameras.size()) continue;
                 if (node >= (u32)fa.cameras[view_idx].keypoints.size()) continue;
-                if (fa.cameras[view_idx].keypoints[node].labeled &&
-                    fa.cameras[view_idx].keypoints[node].source == LabelSource::Manual) {
+                const Keypoint2D &kp = fa.cameras[view_idx].keypoints[node];
+                if (kp.labeled && !kp.occluded &&
+                    (use_all_available || kp.source == LabelSource::Manual)) {
                     Eigen::Vector2d pt(
                         fa.cameras[view_idx].keypoints[node].x,
                         (double)scene->image_height[view_idx] -

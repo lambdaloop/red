@@ -33,8 +33,8 @@ struct PosetailWindowState {
     bool show = false;
 
     // ── Seed ──
-    // If the current frame has 2D labels but no triangulated 3D, run the
-    // standard Triangulate (T) first so the seed is available. Off = require
+    // If enabled, refresh the standard Triangulate (T) solve before building
+    // the seed, including when some 3D points already exist. Off = require
     // the user to press T themselves.
     bool auto_triangulate = true;
 

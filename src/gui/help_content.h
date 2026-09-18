@@ -84,6 +84,7 @@ inline const std::vector<Group> &shortcut_groups() {
             {S::PlaceKeypoint, nullptr, "Place the active keypoint at the cursor, then advance to the next node"},
             {S::MarkOccluded, nullptr, "Mark the active keypoint occluded in this camera, then advance"},
             {S::COUNT, "R", "Delete the active keypoint on this camera"},
+            {S::COUNT, "F", "Delete the active keypoint on all cameras"},
             {S::ActivePrev, nullptr, "Previous active keypoint"},
             {S::ActiveNext, nullptr, "Next active keypoint"},
             {S::ActiveFirst, nullptr, "Jump active keypoint to the first node"},

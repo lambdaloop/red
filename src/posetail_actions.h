@@ -107,9 +107,10 @@ inline void write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &
     }
 }
 
-// Collect the seed from the active animal on the current frame. Triangulates
-// first when asked and there is no 3D yet. Returns false (with a message)
-// when there is nothing to seed from.
+// Collect the seed from the active animal on the current frame. When enabled,
+// refresh triangulation before collecting so newly usable projected 2D points
+// can add missing 3D keypoints even when some 3D points already exist. Returns
+// false (with a message) when there is nothing to seed from.
 inline bool collect_seed(PosetailWindowState &st, AppContext &ctx,
                          std::vector<Eigen::Vector3d> &seed,
                          std::vector<int> &seed_node_idx, int &instance_id,
@@ -130,11 +131,17 @@ inline bool collect_seed(PosetailWindowState &st, AppContext &ctx,
             if (fa.kp3d[k].triangulated) n++;
         return n;
     };
-    if (count_3d() == 0 && st.auto_triangulate) {
-        // Same call as pressing T in the Labeling Tool.
+    if (st.auto_triangulate) {
+        // Same call as pressing T in the Labeling Tool. Do this even when
+        // some 3D points already exist: reprojection() may now triangulate
+        // additional nodes from all non-missing projected observations.
+        const int before = count_3d();
         reprojection(fa, &ctx.skeleton, ctx.pm.camera_params, ctx.scene);
-        printf("[PoseTail] Triangulated frame %d (animal id %d) for the seed\n",
-               ctx.current_frame_num, instance_id);
+        const int after = count_3d();
+        if (after != before) {
+            printf("[PoseTail] Triangulated frame %d (animal id %d) for the seed: %d -> %d points\n",
+                   ctx.current_frame_num, instance_id, before, after);
+        }
     }
     for (int k = 0; k < (int)fa.kp3d.size() && k < ctx.skeleton.num_nodes; ++k) {
         if (!fa.kp3d[k].triangulated) continue;

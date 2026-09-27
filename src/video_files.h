@@ -21,10 +21,10 @@
 #include <string>
 #include <cctype>
 
-inline const char *const kVideoExts[] = {".mp4"};
+inline const char *const kVideoExts[] = {".avi", ".mp4"};
 
 // For an ImGuiFileDialog filter string.
-inline const char *video_ext_filter() { return ".mp4"; }
+inline const char *video_ext_filter() { return ".avi,.AVI,.mp4,.MP4"; }
 
 inline bool is_video_ext(const std::string &ext) {
     std::string e;
@@ -38,10 +38,20 @@ inline bool is_video_ext(const std::string &ext) {
 inline std::string find_camera_video(const std::string &media_folder,
                                      const std::string &cam) {
     namespace fs = std::filesystem;
+    const fs::path folder(media_folder);
     for (const char *ext : kVideoExts) {
-        fs::path p = fs::path(media_folder) / (cam + ext);
+        fs::path p = folder / (cam + ext);
         std::error_code ec;
-        if (fs::exists(p, ec)) return p.string();
+        if (fs::is_regular_file(p, ec)) return p.string();
+    }
+    std::error_code ec;
+    for (fs::directory_iterator it(folder, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const fs::path &p = it->path();
+        if (!it->is_regular_file(ec) || p.stem().string() != cam ||
+            !is_video_ext(p.extension().string()))
+            continue;
+        return p.string();
     }
     return std::string();
 }

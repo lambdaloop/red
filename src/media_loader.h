@@ -6,9 +6,9 @@
 #include "utils.h"
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
-#include <cctype>
 #include <filesystem>
 #include <set>
 #include "video_files.h"
@@ -552,8 +552,7 @@ load_videos(std::map<std::string, std::string> &selected_files,
         for (const auto &cam_string : pm.camera_names) {
             std::map<std::string, std::string> m;
             std::string media_filename =
-                std::filesystem::path(camera_video_path(pm.media_folder, cam_string))
-                    .string();
+                camera_video_path(pm.media_folder, cam_string);
             try {
                 FFmpegDemuxer *demuxer =
                     new FFmpegDemuxer(media_filename.c_str(), m);
@@ -585,9 +584,8 @@ load_videos(std::map<std::string, std::string> &selected_files,
         pm.camera_names = loaded_cam_names;
     } else {
         for (const auto &elem : selected_files) {
-            std::size_t cam_string_mp4_position = elem.first.find("mp4");
             std::string cam_string =
-                elem.first.substr(0, cam_string_mp4_position - 1);
+                std::filesystem::path(elem.first).stem().string();
             std::map<std::string, std::string> m;
             try {
                 FFmpegDemuxer *demuxer =

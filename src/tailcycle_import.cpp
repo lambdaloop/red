@@ -541,6 +541,35 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
         }
     }
 
+    // ── instances.pq ── boxes only. red has no model for `present`/`absent`
+    // without a box, so those rows carry nothing it can hold.
+    if (auto it = read_pq(D / "instances.pq")) {
+        DictCol cam(it, "camera"), aid(it, "animal_id"), gid(it, "group_id");
+        NumCol fr(it, "frame"), x0(it, "x0"), y0(it, "y0"), x1(it, "x1"), y1(it, "y1");
+        if (cam.ok && fr.ok && x0.ok && y0.ok && x1.ok && y1.ok) {
+            for (size_t i = 0; i < fr.vals.size(); i++) {
+                if (gid.ok && gid.vals[i] != out->group_id) continue;
+                if (x0.null[i] || y0.null[i] || x1.null[i] || y1.null[i]) continue;
+                if (x1.vals[i] <= x0.vals[i] || y1.vals[i] <= y0.vals[i]) continue;  // empty box
+                const int f = (int)fr.vals[i];
+                if (f < 0 || f >= out->n_frames) continue;
+                const int ci = name_index(out->camera_names, cam.vals[i]);
+                if (ci < 0) return fail("instances.pq: camera \"" + cam.vals[i] +
+                                        "\" is not in calibration.toml (rule 6).");
+                const int inst = instance_of(aid.ok ? aid.vals[i] : std::string("a00"));
+                CameraExtras &e = frame_of((u32)f, inst).cameras[ci].get_extras();
+                e.bbox_x = x0.vals[i];
+                e.bbox_y = y0.vals[i];
+                e.bbox_w = x1.vals[i] - x0.vals[i];
+                e.bbox_h = y1.vals[i] - y0.vals[i];
+                e.has_bbox = true;
+                st.instance_rows++;
+            }
+        } else {
+            st.warnings.push_back("instances.pq: unexpected column types; boxes skipped.");
+        }
+    }
+
     if (!out->has_2d && !out->has_3d)
         return fail("Session has neither keypoints.pq nor points3d.pq (§3).");
     st.frames = (int)out->annotations.size();

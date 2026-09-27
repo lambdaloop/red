@@ -83,6 +83,7 @@ bool scan_dataset(const std::string &root, std::vector<SessionInfo> *out,
 struct ImportStats {
     int keypoint_rows = 0;
     int points3d_rows = 0;
+    int instance_rows = 0;   // boxes read from instances.pq
     int frames = 0;
     std::vector<std::string> warnings;
 };

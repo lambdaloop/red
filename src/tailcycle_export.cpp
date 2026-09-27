@@ -12,7 +12,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <system_error>
+#include <tuple>
 #endif
 
 namespace TailcycleExport {
@@ -229,6 +231,13 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         jobs.push_back({Bucket::Tracked, Tailcycle::labels::kTracked, both ? "_tracked" : ""});
     if (jobs.empty()) return fail("Nothing selected to export.");
 
+    // A box on an animal with no keypoints in this session is still a human
+    // judgement. It goes with the hand annotations when there is such a
+    // session, otherwise with the first session written.
+    const Job *box_owner = &jobs.front();
+    for (const Job &j : jobs)
+        if (!forced && j.b == Bucket::Annotated) { box_owner = &j; break; }
+
     for (const Job &job : jobs) {
         const std::string sid = cfg.session_id + job.suffix;
         const fs::path dir = fs::path(cfg.output_folder) / cfg.split / sid;
@@ -279,6 +288,12 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 if (!s.ok()) return fail("groups.pq: " + s.ToString());
             }
         }
+
+        // (frame, instance_id, camera) with a keypoint row, and (frame,
+        // instance_id) with a 3D row, in THIS session. instances.pq must give
+        // each keypoint key a `labeled` row (rule 11).
+        std::set<std::tuple<int, int, int>> kp_keys;
+        std::set<std::pair<int, int>> p3_keys;
 
         // ── keypoints.pq ──
         // Red keeps the user provenance (`Manual`) as `visible`, even when a
@@ -339,6 +354,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                         if (scored) any_score = true;
                         if (!(scored ? sc_b.Append(kp.confidence) : sc_b.AppendNull()).ok())
                             return fail("keypoints.pq: score append failed.");
+                        kp_keys.insert({frame, fa.instance_id, (int)ci});
                         rows++;
                     }
                 }
@@ -389,6 +405,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                     if (scored) any_score = true;
                     if (!(scored ? sc_b.Append(k3.confidence) : sc_b.AppendNull()).ok())
                         return fail("points3d.pq: score append failed.");
+                    p3_keys.insert({frame, fa.instance_id});
                     rows++;
                 }
             }
@@ -406,6 +423,78 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                     (dir / "points3d.pq").string());
                 if (!s.ok()) return fail("points3d.pq: " + s.ToString());
                 st.points3d_rows += rows;
+            }
+        }
+
+        // ── instances.pq (§9) ──
+        // Written only when red has at least one box to say something about;
+        // an absent file is legal and claims nothing. When it is written,
+        // every animal/view with keypoint rows gets a `labeled` row (box or
+        // not) so rule 11 holds. A box on an animal that has no keypoints
+        // in this camera and no 3D in this session is `present`: the animal
+        // is there but was not keypoint-annotated. red's bboxes are already
+        // top-left image coordinates, so only origin+extent -> [x0,x1) is
+        // converted.
+        //
+        // Skipped in place: red does not model `present`/`absent` rows
+        // without boxes, so rewriting an existing file would drop them.
+        if (!cfg.in_place) {
+            arrow::StringDictionary32Builder g_b, a_b, c_b, s_b;
+            arrow::Int32Builder f_b;
+            arrow::FloatBuilder x0_b, y0_b, x1_b, y1_b;
+            arrow::StringBuilder n_b;
+            std::set<std::tuple<int, int, int>> written;
+            bool any_box = false;
+            int rows = 0;
+
+            for (const auto &[fnum, fis] : amap)
+            for (const FrameAnnotation &fa : fis) {
+                const int frame = (int)fnum - cfg.source_frame_start;
+                if (frame < 0 || frame >= cfg.n_frames) continue;
+                for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
+                    const CameraAnnotation &cam = fa.cameras[ci];
+                    const bool box = cam.has_bbox() && cam.extras->bbox_w > 0 &&
+                                     cam.extras->bbox_h > 0;
+                    const bool kp = kp_keys.count({frame, fa.instance_id, (int)ci}) > 0;
+                    const bool p3 = p3_keys.count({frame, fa.instance_id}) > 0;
+                    if (!kp && !box) continue;
+                    if (!kp && !p3 && &job != box_owner) continue;
+                    if (!written.insert({frame, fa.instance_id, (int)ci}).second) continue;
+                    const char *stt = (kp || p3) ? Tailcycle::status::kLabeled
+                                                 : Tailcycle::status::kPresent;
+                    if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
+                        !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
+                        !c_b.Append(cfg.camera_names[ci]).ok() || !s_b.Append(stt).ok() ||
+                        !n_b.AppendNull().ok())
+                        return fail("instances.pq: builder append failed.");
+                    if (box) {
+                        const CameraExtras &e = *cam.extras;
+                        any_box = true;
+                        if (!x0_b.Append((float)e.bbox_x).ok() ||
+                            !y0_b.Append((float)e.bbox_y).ok() ||
+                            !x1_b.Append((float)(e.bbox_x + e.bbox_w)).ok() ||
+                            !y1_b.Append((float)(e.bbox_y + e.bbox_h)).ok())
+                            return fail("instances.pq: box append failed.");
+                    } else if (!x0_b.AppendNull().ok() || !y0_b.AppendNull().ok() ||
+                               !x1_b.AppendNull().ok() || !y1_b.AppendNull().ok()) {
+                        return fail("instances.pq: box append failed.");
+                    }
+                    rows++;
+                }
+            }
+
+            if (any_box && rows > 0) {
+                std::vector<std::shared_ptr<arrow::Array>> a(10);
+                if (!g_b.Finish(&a[0]).ok() || !f_b.Finish(&a[1]).ok() || !a_b.Finish(&a[2]).ok() ||
+                    !c_b.Finish(&a[3]).ok() || !x0_b.Finish(&a[4]).ok() || !y0_b.Finish(&a[5]).ok() ||
+                    !x1_b.Finish(&a[6]).ok() || !y1_b.Finish(&a[7]).ok() || !s_b.Finish(&a[8]).ok() ||
+                    !n_b.Finish(&a[9]).ok())
+                    return fail("instances.pq: finish failed.");
+                auto s = Tailcycle::write_table(
+                    arrow::Table::Make(Tailcycle::instances_schema(), a),
+                    (dir / "instances.pq").string());
+                if (!s.ok()) return fail("instances.pq: " + s.ToString());
+                st.instance_rows += rows;
             }
         }
 

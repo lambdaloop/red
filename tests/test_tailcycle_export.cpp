@@ -614,6 +614,68 @@ int main(int argc, char **argv) {
               "image size and nominal pinhole survive round-trip");
     }
 
+    // ── 4c. boxes go to instances.pq, keyed so rule 11 holds ──
+    {
+        const std::string out = root + "/t4c";
+        auto cfg = make_config(out);
+        AnnotationMap amap = make_annotations();
+        {
+            CameraExtras &e = amap.at(0).front().cameras[0].get_extras();
+            e.bbox_x = 10; e.bbox_y = 20; e.bbox_w = 30; e.bbox_h = 40; e.has_bbox = true;
+        }
+        {
+            // A second animal with a box and nothing else.
+            FrameAnnotation boxed = make_frame(NN, NC, 1, /*instance_id=*/1);
+            CameraExtras &e = boxed.cameras[1].get_extras();
+            e.bbox_x = 100; e.bbox_y = 110; e.bbox_w = 50; e.bbox_h = 60; e.has_bbox = true;
+            amap.at(1).push_back(std::move(boxed));
+        }
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "export with boxes succeeds: " + status);
+        const fs::path A = fs::path(out) / "train" / "sess1_annotated";
+        const fs::path T = fs::path(out) / "train" / "sess1_tracked";
+        auto it = read_pq(A / "instances.pq");
+        CHECK(it != nullptr, "instances.pq written when boxes exist");
+        // 4 frames x 2 cameras labelled, plus the box-only animal.
+        CHECK(it && it->num_rows() == 9, "one labeled row per keypoint view, plus the box-only one");
+        CHECK(it && (dict_values(it, "status") == std::set<std::string>{"labeled", "present"}),
+              "keypoint views are labeled; a box-only animal is present");
+        bool box_ok = false, present_ok = false;
+        for (int64_t r = 0; it && r < it->num_rows(); r++) {
+            auto fcol = [&](const char *n) {
+                auto a = std::static_pointer_cast<arrow::FloatArray>(it->GetColumnByName(n)->chunk(0));
+                return a->IsNull(r) ? -1.0f : a->Value(r);
+            };
+            if (int_at(it, "frame", r) == 0 && dict_at(it, "camera", r) == "camA" &&
+                dict_at(it, "animal_id", r) == "a00")
+                box_ok = fcol("x0") == 10.0f && fcol("y0") == 20.0f &&
+                         fcol("x1") == 40.0f && fcol("y1") == 60.0f &&
+                         dict_at(it, "status", r) == "labeled";
+            if (dict_at(it, "animal_id", r) == "a01")
+                present_ok = int_at(it, "frame", r) == 1 && dict_at(it, "camera", r) == "camB" &&
+                             dict_at(it, "status", r) == "present" && fcol("x1") == 150.0f;
+        }
+        CHECK(box_ok, "box is [x0,x1) x [y0,y1) in image coordinates");
+        CHECK(present_ok, "box-only animal is written as present with its box");
+        CHECK(!fs::exists(T / "instances.pq"), "a session with no boxes gets no instances.pq");
+
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(A.string(), "sess1", &imported, &ist, &status),
+              "session with instances.pq imports: " + status);
+        CHECK(ist.instance_rows == 2, "both boxes are read back");
+        bool rt = false;
+        if (imported.annotations.count(0))
+            for (const auto &fa : imported.annotations.at(0))
+                if (fa.instance_id == 0 && fa.cameras[0].has_bbox()) {
+                    const auto &e = fa.cameras[0].get_extras();
+                    rt = e.bbox_x == 10 && e.bbox_y == 20 && e.bbox_w == 30 && e.bbox_h == 40;
+                }
+        CHECK(rt, "box round-trips through instances.pq");
+    }
+
     // ── 5. refusals: a file that loads cleanly and is wrong is worse than none ──
     {
         auto cfg = make_config(root + "/t5");

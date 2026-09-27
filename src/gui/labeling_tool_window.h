@@ -18,6 +18,8 @@ struct LabelingToolState {
     std::time_t last_saved = static_cast<std::time_t>(-1);
     bool save_requested = false;
     bool timeline_reset_pending = false;
+    int timeline_camera = -1;
+    bool timeline_per_video = false;
     // Height of the keypoints table, in pixels. 0 = follow the window: take
     // whatever the frame overview below does not need. Set by dragging the
     // splitter under the table; double-clicking it goes back to 0.
@@ -316,6 +318,21 @@ inline void DrawLabelingToolWindow(
         ImGui::Separator();
 
         // === Collect labeled frames (counts + timeline) ===
+        // In 2D projects each video is an independent sequence, so scope the
+        // timeline to the currently focused view. Multiview projects retain
+        // their shared, synchronized timeline.
+        const bool per_video_timeline = project_is_2d(pm) && scene->num_cams > 1;
+        int timeline_camera = 0;
+        if (per_video_timeline) {
+            for (int c = 0; c < (int)ctx.is_view_focused.size(); ++c)
+                if (ctx.is_view_focused[c]) { timeline_camera = c; break; }
+        }
+        if (state.timeline_per_video != per_video_timeline ||
+            state.timeline_camera != timeline_camera) {
+            state.timeline_reset_pending = true;
+            state.timeline_per_video = per_video_timeline;
+            state.timeline_camera = timeline_camera;
+        }
         // needs_improvement frames (promoted predictions awaiting a manual fix)
         // are collected separately so they get their own section below.
         // The states themselves are documented on KpProgress in annotation.h,
@@ -331,10 +348,21 @@ inline void DrawLabelingToolWindow(
         // The frame list is per frame, not per animal: a frame appears once,
         // classified by the animal being labelled.
         for (const auto &[fnum, fis] : annotations) {
-            if (fis.empty() || !frame_has_any_keypoints(fis.front()))
-                continue;
-            const FrameAnnotation &fa = fis.front();
-            KpProgress state = classify_kp_state(fa);
+            if (fis.empty()) continue;
+            FrameAnnotation scoped_fa;
+            const FrameAnnotation *fa_ptr = &fis.front();
+            if (per_video_timeline) {
+                if (timeline_camera >= (int)fis.front().cameras.size()) continue;
+                scoped_fa = fis.front();
+                scoped_fa.cameras = {fis.front().cameras[timeline_camera]};
+                fa_ptr = &scoped_fa;
+            }
+            const FrameAnnotation &fa = *fa_ptr;
+            if (!frame_has_any_keypoints(fa)) continue;
+            KpProgress state = per_video_timeline
+                ? frame_kp_progress(fa, skeleton.num_nodes, 1, true,
+                                    skeleton.has_skeleton)
+                : classify_kp_state(fa);
             if (fa.needs_improvement)
                 needs_fix_frames.push_back({(int)fnum, state});
             else
@@ -346,10 +374,17 @@ inline void DrawLabelingToolWindow(
         std::vector<BBoxFrameInfo> bbox_frames;
         for (const auto &[fnum, fis] : annotations) {
             bool any_bbox = false, any_obb = false;
-            for (const auto &fa : fis)
-              for (const auto &cam : fa.cameras) {
+            for (const auto &fa : fis) {
+              if (per_video_timeline) {
+                if (timeline_camera < (int)fa.cameras.size()) {
+                    const auto &cam = fa.cameras[timeline_camera];
+                    if (cam.has_bbox()) any_bbox = true;
+                    if (cam.has_obb()) any_obb = true;
+                }
+              } else for (const auto &cam : fa.cameras) {
                 if (cam.has_bbox()) any_bbox = true;
                 if (cam.has_obb())  any_obb  = true;
+              }
             }
             if (any_bbox || any_obb)
                 bbox_frames.push_back({(int)fnum, any_bbox, any_obb});
@@ -392,7 +427,15 @@ inline void DrawLabelingToolWindow(
         // that was never labelled has no annotation entry, so it has no tick
         // at all and you are hunting an absence. A button that walks the list
         // is the only thing that reliably reaches it.
-        const int total_frames = dc_context->estimated_num_frames;
+        int total_frames = dc_context->estimated_num_frames;
+        if (per_video_timeline && !ctx.input_is_imgs &&
+            timeline_camera < (int)ctx.demuxers.size() &&
+            ctx.demuxers[timeline_camera]) {
+            const auto *demuxer = ctx.demuxers[timeline_camera];
+            total_frames = demuxer->GetNumFrames() == 0
+                ? (int)(demuxer->GetDuration() * demuxer->GetFramerate())
+                : (int)demuxer->GetNumFrames() - 1;
+        }
         // Are the never-labelled frames the exception, or the norm? On a
         // video where 100 frames of 8000 are labelled they are the norm: an
         // orange tick on each would paint the bar and bury the 100 that

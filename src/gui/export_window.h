@@ -43,6 +43,9 @@ struct ExportWindowState {
     };
     std::vector<TailcycleRange> tailcycle_ranges{{}};
     char tailcycle_session_id[128] = "";
+    // Only the frames around labels, as clips of this many consecutive frames.
+    bool tailcycle_around_labels = false;
+    int tailcycle_window = 32;
     int tailcycle_layers = 0;   // 2D | 2D+3D | 3D only
     std::string tailcycle_range_error;
     bool include_video_index = false; // JARVIS: include video_index.json
@@ -186,6 +189,22 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
             ImGui::TextDisabled(
                 "Frames are extracted into each group, so the dataset is "
                 "self-contained.");
+            ImGui::Checkbox("Only frames around labels", &state.tailcycle_around_labels);
+            ImGui::SetItemTooltip(
+                "Instead of the whole range, export a clip of consecutive frames "
+                "around every labelled frame. Each clip is centred on its label and "
+                "shifted inward at the ends of the range so it keeps its length; clips "
+                "that overlap or touch merge into one group.");
+            if (state.tailcycle_around_labels) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(160);
+                ImGui::SliderInt("Clip frames", &state.tailcycle_window, 1, 256);
+                if (state.tailcycle_window < 1) state.tailcycle_window = 1;
+                ImGui::SetItemTooltip(
+                    "Consecutive frames per clip around each label. 1 exports only "
+                    "the labelled frames themselves (no temporal context).");
+            }
+            const int tc_window = state.tailcycle_around_labels ? state.tailcycle_window : 0;
             static const char *kSplits[] = {"train", "val", "test"};
             int remove_at = -1;
             for (size_t i = 0; i < state.tailcycle_ranges.size(); i++) {
@@ -212,9 +231,13 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                     const int last = (r.end > 0 && r.end < tc_total) ? r.end
                                      : (tc_total > 0 ? tc_total - 1 : r.start);
                     const int n = last >= r.start ? last - r.start + 1 : 0;
-                    const long long imgs = (long long)n * (long long)pm.camera_names.size();
+                    const long long imgs = ExportFormats::tailcycle_image_estimate(
+                        amap, pm.camera_names.size(), state.tailcycle_layers, r.start, last,
+                        tc_window);
                     ImGui::SameLine();
-                    if (r.end == 0 && tc_total > 0)
+                    if (tc_window > 0)
+                        ImGui::TextDisabled("%d frames, %lld images around labels", n, imgs);
+                    else if (r.end == 0 && tc_total > 0)
                         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.3f, 1.0f),
                                            "to end: %d frames, %lld images", n, imgs);
                     else
@@ -410,33 +433,18 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                     // annotated frame, so kp_count is the wrong denominator --
                     // it made the progress bar read 1717 / 813416.
                     if (dispatch_fmt == ExportFormats::TAILCYCLE) {
-                        int tc_frames = 0;
+                        long long tc_images = 0;
+                        const int tc_window =
+                            state.tailcycle_around_labels ? state.tailcycle_window : 0;
                         for (const auto &r : state.tailcycle_ranges) {
                             const int last = (r.end > 0 && r.end < tc_total)
                                                  ? r.end
                                                  : (tc_total > 0 ? tc_total - 1 : r.start);
-                            if (last >= r.start) tc_frames += last - r.start + 1;
+                            tc_images += ExportFormats::tailcycle_image_estimate(
+                                amap, pm.camera_names.size(), state.tailcycle_layers,
+                                r.start, last, tc_window);
                         }
-                        // A 2D export extracts only videos that carry labels.
-                        int tc_cams = (int)pm.camera_names.size();
-                        if (state.tailcycle_layers == 0) {
-                            tc_cams = 0;
-                            for (size_t ci = 0; ci < pm.camera_names.size(); ci++) {
-                                bool any = false;
-                                for (const auto &[f, fis] : amap) {
-                                    for (const auto &fa : fis) {
-                                        if (ci >= fa.cameras.size()) continue;
-                                        const auto &cam = fa.cameras[ci];
-                                        for (const auto &kp : cam.keypoints)
-                                            if (keypoint2d_assessed(kp)) any = true;
-                                        if (cam.has_bbox()) any = true;
-                                    }
-                                    if (any) break;
-                                }
-                                if (any) ++tc_cams;
-                            }
-                        }
-                        state.images_total = tc_frames * tc_cams;
+                        state.images_total = (int)tc_images;
                     } else {
                         state.images_total = kp_count * (int)pm.camera_names.size();
                     }
@@ -479,6 +487,8 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                     if (dispatch_fmt == ExportFormats::TAILCYCLE) {
                         ecfg.tailcycle_session_id = state.tailcycle_session_id;
                         ecfg.tailcycle_layers = state.tailcycle_layers;
+                        ecfg.tailcycle_window =
+                            state.tailcycle_around_labels ? state.tailcycle_window : 0;
                         // n_frames must describe the media, not the labels: every
                         // frame index in the tables is validated against it, and
                         // the annotation range is usually a sparse subset.

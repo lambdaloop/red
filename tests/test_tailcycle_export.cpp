@@ -720,6 +720,47 @@ int main(int argc, char **argv) {
               infos[0].has_boxes, "scan lists the boxes-only session");
     }
 
+    // ── 4e. several clips of one recording become several groups ──
+    {
+        const std::string out = root + "/t4e";
+        auto cfg = make_config(out);
+        cfg.force_labels = "annotated";
+        // red frames 100..104 are labelled; clips cover 100-101 and 103-104,
+        // so frame 102 falls between groups and is not exported.
+        cfg.groups = {{"rec_ix103", 2, 103}, {"rec_ix100", 2, 100}};
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, make_annotations(100), &st, &status),
+              "multi-group export succeeds: " + status);
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        CHECK(fs::is_directory(d / "groups" / "rec_ix100") &&
+              fs::is_directory(d / "groups" / "rec_ix103"), "one folder per group");
+        auto g = read_pq(d / "groups.pq");
+        CHECK(g && g->num_rows() == 2, "one groups.pq row per group");
+        CHECK(g && int_at(g, "source_frame_start", 0) == 100 && int_at(g, "n_frames", 0) == 2 &&
+              int_at(g, "source_frame_start", 1) == 103, "groups sorted by source frame");
+        auto k = read_pq(d / "keypoints.pq");
+        CHECK(k && dict_values(k, "group_id") == (std::set<std::string>{"rec_ix100", "rec_ix103"}),
+              "rows are keyed by their own group");
+        bool rebased = true;
+        for (int64_t r = 0; k && r < k->num_rows(); r++)
+            if (int_at(k, "frame", r) < 0 || int_at(k, "frame", r) > 1) rebased = false;
+        CHECK(rebased, "frames are rebased into each group");
+        // 2 cameras x 3 nodes on frames 100, 101, 103 (frame 103 lacks TailBase) + 104
+        CHECK(k && k->num_rows() == 6 + 6 + 4 + 6, "frame 102, between groups, is dropped");
+
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "rec_ix103", &imported, &ist, &status),
+              "a group of a multi-group session imports: " + status);
+        CHECK(imported.n_frames == 2 && imported.source_frame_start == 103 &&
+              imported.annotations.size() == 2, "the chosen group's frames only");
+
+        cfg.groups = {{"a", 3, 100}, {"b", 2, 102}};
+        CHECK(!TailcycleExport::export_session(cfg, make_annotations(100), &st, &status),
+              "overlapping groups are refused");
+    }
+
     // ── 5. refusals: a file that loads cleanly and is wrong is worse than none ──
     {
         auto cfg = make_config(root + "/t5");

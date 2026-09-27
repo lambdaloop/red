@@ -7,6 +7,7 @@
 #include "tailcycle_schema.h"
 #include "red_math.h"
 #include <arrow/api.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -166,7 +167,8 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     if (cfg.calibration.size() != cfg.camera_names.size())
         return fail("Calibration count does not match camera count.");
     if (cfg.node_names.empty()) return fail("Skeleton has no keypoint names.");
-    if (cfg.n_frames <= 0) return fail("n_frames must come from the media and be > 0.");
+    if (cfg.groups.empty() && cfg.n_frames <= 0)
+        return fail("n_frames must come from the media and be > 0.");
 
     const bool minimal_2d = cfg.camera_names.size() == 1 &&
                             cfg.layers == ExportConfig::Layers::TwoD;
@@ -186,6 +188,41 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     }
 
     const std::string gid = cfg.group_id.empty() ? cfg.session_id : cfg.group_id;
+
+    // The session's groups, sorted by source frame. Without cfg.groups it is
+    // the single group the scalar fields describe.
+    std::vector<ExportConfig::Group> groups = cfg.groups;
+    if (groups.empty()) groups.push_back({gid, cfg.n_frames, cfg.source_frame_start});
+    std::sort(groups.begin(), groups.end(),
+              [](const ExportConfig::Group &a, const ExportConfig::Group &b) {
+                  return a.source_frame_start < b.source_frame_start;
+              });
+    {
+        std::set<std::string> ids;
+        for (size_t i = 0; i < groups.size(); i++) {
+            const auto &g = groups[i];
+            if (g.id.empty() || !ids.insert(g.id).second)
+                return fail("Group ids must be non-empty and unique.");
+            if (g.n_frames <= 0) return fail("Group " + g.id + " has no frames.");
+            if (i > 0 && groups[i - 1].source_frame_start + groups[i - 1].n_frames >
+                             g.source_frame_start)
+                return fail("Groups " + groups[i - 1].id + " and " + g.id + " overlap.");
+        }
+    }
+    // Which group holds red frame `fnum`, and its index inside that group.
+    // A frame outside every group is not exported (rule 6).
+    auto locate = [&](u32 fnum, int *frame) -> const ExportConfig::Group * {
+        auto it = std::upper_bound(groups.begin(), groups.end(), (int)fnum,
+                                   [](int f, const ExportConfig::Group &g) {
+                                       return f < g.source_frame_start;
+                                   });
+        if (it == groups.begin()) return nullptr;
+        --it;
+        const int local = (int)fnum - it->source_frame_start;
+        if (local < 0 || local >= it->n_frames) return nullptr;
+        *frame = local;
+        return &*it;
+    };
     // The format keys every row by (group, frame, animal, camera, bodypart),
     // so an id shared between animals is not a cosmetic problem: the rows
     // collide, and a reader keeping the last one per key silently keeps one
@@ -270,8 +307,10 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             if (!fs::is_directory(dir))
                 return fail("Session folder is gone: " + dir.string());
         } else {
-            fs::create_directories(dir / "groups" / gid, ec);
-            if (ec) return fail("Cannot create " + dir.string() + ": " + ec.message());
+            for (const auto &g : groups) {
+                fs::create_directories(dir / "groups" / g.id, ec);
+                if (ec) return fail("Cannot create " + dir.string() + ": " + ec.message());
+            }
         }
 
         std::string err;
@@ -291,12 +330,14 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 arrow::StringBuilder gid_b, src_b, notes_b;
                 arrow::Int32Builder nf_b, start_b, step_b;
                 arrow::FloatBuilder fps_b;
-                auto ok = gid_b.Append(gid).ok() && nf_b.Append(cfg.n_frames).ok() &&
-                          src_b.Append(cfg.source_video).ok() &&
-                          start_b.Append(cfg.source_frame_start).ok() && step_b.Append(1).ok() &&
-                          notes_b.Append("").ok() &&
-                          (cfg.fps > 0 ? fps_b.Append(cfg.fps).ok() : fps_b.AppendNull().ok());
-                if (!ok) return fail("groups.pq: builder append failed.");
+                for (const auto &g : groups) {
+                    auto ok = gid_b.Append(g.id).ok() && nf_b.Append(g.n_frames).ok() &&
+                              src_b.Append(cfg.source_video).ok() &&
+                              start_b.Append(g.source_frame_start).ok() && step_b.Append(1).ok() &&
+                              notes_b.Append("").ok() &&
+                              (cfg.fps > 0 ? fps_b.Append(cfg.fps).ok() : fps_b.AppendNull().ok());
+                    if (!ok) return fail("groups.pq: builder append failed.");
+                }
                 std::vector<std::shared_ptr<arrow::Array>> a(7);
                 if (!gid_b.Finish(&a[0]).ok() || !nf_b.Finish(&a[1]).ok() || !fps_b.Finish(&a[2]).ok() ||
                     !src_b.Finish(&a[3]).ok() || !start_b.Finish(&a[4]).ok() ||
@@ -308,7 +349,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             }
         }
 
-        // (frame, instance_id, camera) with a keypoint row, and (frame,
+        // (red frame, instance_id, camera) with a keypoint row, and (red frame,
         // instance_id) with a 3D row, in THIS session. instances.pq must give
         // each keypoint key a `labeled` row (rule 11).
         std::set<std::tuple<int, int, int>> kp_keys;
@@ -328,8 +369,9 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
 
             for (const auto &[fnum, fis] : amap)
       for (const FrameAnnotation &fa : fis) {
-                const int frame = (int)fnum - cfg.source_frame_start;
-                if (frame < 0 || frame >= cfg.n_frames) continue;   // rule 6
+                int frame = 0;
+                const ExportConfig::Group *grp = locate(fnum, &frame);
+                if (!grp) continue;   // rule 6
                 if (cfg.layers == ExportConfig::Layers::ThreeD) break;
                 for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
                     const auto &cam = fa.cameras[ci];
@@ -347,7 +389,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                             continue;   // no row, not `unlabeled` (§7)
                         if (cfg.force_labels.empty() &&
                             bucket_2d(kp.source) != job.b) continue;
-                        if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
+                        if (!g_b.Append(grp->id).ok() || !f_b.Append(frame).ok() ||
                             !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
                             !c_b.Append(cfg.camera_names[ci]).ok() ||
                             !p_b.Append(cfg.node_names[ni]).ok() ||
@@ -373,7 +415,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                         if (scored) any_score = true;
                         if (!(scored ? sc_b.Append(kp.confidence) : sc_b.AppendNull()).ok())
                             return fail("keypoints.pq: score append failed.");
-                        kp_keys.insert({frame, fa.instance_id, (int)ci});
+                        kp_keys.insert({(int)fnum, fa.instance_id, (int)ci});
                         rows++;
                     }
                 }
@@ -405,15 +447,16 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
 
             for (const auto &[fnum, fis] : amap)
       for (const FrameAnnotation &fa : fis) {
-                const int frame = (int)fnum - cfg.source_frame_start;
-                if (frame < 0 || frame >= cfg.n_frames) continue;
+                int frame = 0;
+                const ExportConfig::Group *grp = locate(fnum, &frame);
+                if (!grp) continue;
                 for (size_t ni = 0; ni < fa.kp3d.size() && ni < cfg.node_names.size(); ni++) {
                     const Keypoint3D &k3 = fa.kp3d[ni];
                     if (k3.source == Kp3DSource::None) continue;
                     if (cfg.layers == ExportConfig::Layers::TwoD) continue;
                     if (cfg.force_labels.empty() &&
                         bucket_3d(k3.source) != job.b) continue;
-                    if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
+                    if (!g_b.Append(grp->id).ok() || !f_b.Append(frame).ok() ||
                         !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
                         !p_b.Append(cfg.node_names[ni]).ok() ||
                         !s_b.Append(Tailcycle::status::kVisible).ok() ||
@@ -424,7 +467,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                     if (scored) any_score = true;
                     if (!(scored ? sc_b.Append(k3.confidence) : sc_b.AppendNull()).ok())
                         return fail("points3d.pq: score append failed.");
-                    p3_keys.insert({frame, fa.instance_id});
+                    p3_keys.insert({(int)fnum, fa.instance_id});
                     rows++;
                 }
             }
@@ -470,21 +513,22 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
 
             for (const auto &[fnum, fis] : amap)
             for (const FrameAnnotation &fa : fis) {
-                const int frame = (int)fnum - cfg.source_frame_start;
-                if (frame < 0 || frame >= cfg.n_frames) continue;
+                int frame = 0;
+                const ExportConfig::Group *grp = locate(fnum, &frame);
+                if (!grp) continue;
                 for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
                     const CameraAnnotation &cam = fa.cameras[ci];
                     const bool box = has_box(cam);
-                    const bool kp = kp_keys.count({frame, fa.instance_id, (int)ci}) > 0;
-                    const bool p3 = p3_keys.count({frame, fa.instance_id}) > 0;
+                    const bool kp = kp_keys.count({(int)fnum, fa.instance_id, (int)ci}) > 0;
+                    const bool p3 = p3_keys.count({(int)fnum, fa.instance_id}) > 0;
                     if (!kp && !box) continue;
                     // A box whose keypoints went to the other session stays
                     // with them; a box-only one goes to box_owner alone.
                     const bool box_only = box && !view_has_labels(fa, ci);
                     if (!kp && !p3 && !(box_only && &job == box_owner)) continue;
-                    if (!written.insert({frame, fa.instance_id, (int)ci}).second) continue;
+                    if (!written.insert({(int)fnum, fa.instance_id, (int)ci}).second) continue;
                     const char *stt = Tailcycle::status::kLabeled;
-                    if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
+                    if (!g_b.Append(grp->id).ok() || !f_b.Append(frame).ok() ||
                         !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
                         !c_b.Append(cfg.camera_names[ci]).ok() || !s_b.Append(stt).ok() ||
                         !n_b.AppendNull().ok())

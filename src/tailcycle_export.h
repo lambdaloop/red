@@ -42,6 +42,19 @@ struct ExportConfig {
     int source_frame_start = 0;     // red's frame_number is absolute; §6 rebases
     std::string source_video;
 
+    // Several clips of one recording in one session (§2.2, §6). When non-empty
+    // these replace the single group described by group_id / n_frames /
+    // source_frame_start: each is a contiguous run of red frames
+    // [source_frame_start, source_frame_start + n_frames), and each label is
+    // written against the group that contains it, with frame rebased to that
+    // group. A red frame in no group is not exported. Groups must not overlap.
+    struct Group {
+        std::string id;
+        int n_frames = 0;
+        int source_frame_start = 0;
+    };
+    std::vector<Group> groups;
+
     std::string units = "mm";
 
     // Which label tables to write. §3 requires at least one of keypoints.pq

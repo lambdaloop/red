@@ -118,6 +118,11 @@ struct ExportConfig {
     int tailcycle_frame_start = 0;              // inclusive
     int tailcycle_frame_end = 0;                // inclusive; 0 = to the end
     int tailcycle_layers = 0;   // 0 = 2D, 1 = 2D+3D, 2 = 3D only
+    // Export only frames around labels. 0 = the whole range as one group.
+    // Otherwise every labelled frame gets a window of this many consecutive
+    // frames, centred on it and shifted inward at the range edges so it keeps
+    // its length; windows that overlap or touch merge into one group.
+    int tailcycle_window = 0;
 };
 
 // ── Per-camera image-size resolver ──
@@ -949,6 +954,86 @@ inline bool export_nerfstudio(const ExportConfig &cfg, const AnnotationMap &amap
 // several calls -- the format makes split a directory level so a session
 // belongs wholly to one, which is what stops a shuffled train/val split from
 // putting near-identical adjacent frames on both sides (rule 14).
+// Red frames in [start, end] that carry something a tailcycle session writes:
+// an assessed keypoint or a box in one of the first `n_cams` cameras (unless
+// 3D only), or a 3D point (unless 2D only). `only_cam` >= 0 restricts the 2D
+// check to that camera, which is what a per-video 2D session sees. Sorted,
+// unique.
+inline std::vector<int> tailcycle_labelled_frames(const AnnotationMap &amap, size_t n_cams,
+                                                  int layers, int start, int end,
+                                                  int only_cam = -1) {
+    std::vector<int> out;
+    for (const auto &[fnum, fis] : amap) {
+        if ((int)fnum < start || (int)fnum > end) continue;
+        bool any = false;
+        for (const FrameAnnotation &fa : fis) {
+            for (size_t ci = 0; ci < fa.cameras.size() && ci < n_cams && !any; ci++) {
+                if (only_cam >= 0 && (int)ci != only_cam) continue;
+                const CameraAnnotation &cam = fa.cameras[ci];
+                if (cam.has_bbox() && cam.extras->bbox_w > 0 && cam.extras->bbox_h > 0)
+                    any = true;
+                if (layers != 2)
+                    for (const auto &kp : cam.keypoints)
+                        if (keypoint2d_assessed(kp)) { any = true; break; }
+            }
+            if (layers != 0)
+                for (const auto &k3 : fa.kp3d)
+                    if (k3.source != Kp3DSource::None) { any = true; break; }
+            if (any) break;
+        }
+        if (any) out.push_back((int)fnum);
+    }
+    return out;
+}
+
+// Contiguous [first, last] runs of red frames covering every labelled frame
+// with a `window`-frame clip. Each clip is centred on its label; at the edges
+// of [start, end] it is shifted inward rather than cut, so every group has at
+// least `window` frames when the range allows. Overlapping or adjacent clips
+// merge -- two groups that touch would just be one clip split in two.
+inline std::vector<std::pair<int, int>> tailcycle_label_windows(
+    const std::vector<int> &labelled, int start, int end, int window) {
+    std::vector<std::pair<int, int>> out;
+    if (window <= 0 || end < start) return out;
+    const int span = std::min(window, end - start + 1);
+    const int before = (span - 1) / 2;
+    for (int f : labelled) {
+        int a = f - before;
+        a = std::max(start, std::min(a, end - span + 1));
+        const int b = a + span - 1;
+        if (!out.empty() && a <= out.back().second + 1)
+            out.back().second = std::max(out.back().second, b);
+        else
+            out.push_back({a, b});
+    }
+    return out;
+}
+
+// Images a tailcycle export of red frames [start, end] will extract: what the
+// progress bar and the export window show. Mirrors export_tailcycle: a 2D
+// export is one session per video with labels, the others one session over
+// every camera; `window` > 0 keeps only the clips around labels.
+inline long long tailcycle_image_estimate(const AnnotationMap &amap, size_t n_cams, int layers,
+                                          int start, int end, int window) {
+    if (end < start || n_cams == 0) return 0;
+    auto frames_in = [&](const std::vector<int> &labelled) -> long long {
+        if (window <= 0) return labelled.empty() ? 0 : end - start + 1;
+        long long n = 0;
+        for (const auto &[a, b] : tailcycle_label_windows(labelled, start, end, window))
+            n += b - a + 1;
+        return n;
+    };
+    if (layers == 0) {
+        long long n = 0;
+        for (size_t ci = 0; ci < n_cams; ci++)
+            n += frames_in(tailcycle_labelled_frames(amap, n_cams, layers, start, end, (int)ci));
+        return n;
+    }
+    if (window <= 0) return (long long)(end - start + 1) * (long long)n_cams;
+    return frames_in(tailcycle_labelled_frames(amap, n_cams, layers, start, end)) *
+           (long long)n_cams;
+}
+
 inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
                              std::string *status,
                              std::atomic<int> *img_counter = nullptr,
@@ -1147,6 +1232,28 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
     // Two ranges of one recording then have distinct group ids.
     tc.group_id = stem + "_ix" + std::to_string(start);
 
+    // The clips to write, as inclusive [first, last] red frames. Without a
+    // window it is the whole range; with one, only the frames around labels.
+    std::vector<std::pair<int, int>> clips;
+    if (cfg.tailcycle_window > 0) {
+        clips = tailcycle_label_windows(
+            tailcycle_labelled_frames(amap, cfg.camera_names.size(), cfg.tailcycle_layers,
+                                      start, end),
+            start, end, cfg.tailcycle_window);
+        if (clips.empty()) {
+            if (status) *status = "Error: nothing labelled in frames " + std::to_string(start) +
+                                  "-" + std::to_string(end) + ".";
+            return false;
+        }
+        for (const auto &[a, b] : clips)
+            tc.groups.push_back({stem + "_ix" + std::to_string(a), b - a + 1, a});
+    } else {
+        clips.push_back({start, end});
+        tc.groups.push_back({tc.group_id, n, start});
+    }
+    int clip_frames = 0;
+    for (const auto &[a, b] : clips) clip_frames += b - a + 1;
+
     for (size_t i = 0; i < tc.calibration.size(); i++) {
         const std::string vpath = camera_video_path(cfg.media_folder, cfg.camera_names[i]);
         ffmpeg_reader::FrameReader probe;
@@ -1167,31 +1274,41 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
     TailcycleExport::ExportStats st;
     if (!TailcycleExport::export_session(tc, amap, &st, status)) return false;
 
-    {
-        const fs::path gdir = fs::path(tc.output_folder) / tc.split / tc.session_id /
-                              "groups" / tc.group_id;
-        for (size_t i = 0; i < cfg.camera_names.size(); i++) {
-            const std::string vpath = camera_video_path(cfg.media_folder, cfg.camera_names[i]);
-            if (!fs::exists(vpath)) {
-                if (status) *status = "Error: no video for camera " + cfg.camera_names[i];
-                return false;
-            }
-            ffmpeg_reader::FrameReader reader;
-            if (!reader.open(vpath)) {
-                if (status)
-                    *status = "Error: cannot open " + vpath + " to extract frames.";
-                return false;
-            }
-            const fs::path cdir = gdir / cfg.camera_names[i];
+    // export_session may write two sessions (<id>_annotated, <id>_tracked).
+    // Both need the pixels: decode into the first, then hard-link (or copy)
+    // the frames into the others rather than decoding every frame twice.
+    auto remove_sessions = [&]() {
+        std::error_code ec;
+        for (const auto &sdir : st.sessions) fs::remove_all(sdir, ec);
+    };
+    if (st.sessions.empty()) {
+        if (status) *status = "Error: no session was written.";
+        return false;
+    }
+    const fs::path first_session(st.sessions.front());
+    for (size_t i = 0; i < cfg.camera_names.size(); i++) {
+        const std::string vpath = camera_video_path(cfg.media_folder, cfg.camera_names[i]);
+        if (!fs::exists(vpath)) {
+            if (status) *status = "Error: no video for camera " + cfg.camera_names[i];
+            return false;
+        }
+        ffmpeg_reader::FrameReader reader;
+        if (!reader.open(vpath)) {
+            if (status)
+                *status = "Error: cannot open " + vpath + " to extract frames.";
+            return false;
+        }
+        for (size_t g = 0; g < clips.size(); g++) {
+            const auto [a, b] = clips[g];
+            const fs::path cdir = first_session / "groups" / tc.groups[g].id / cfg.camera_names[i];
             fs::create_directories(cdir);
-            for (int f = start; f <= end; f++) {
+            for (int f = a; f <= b; f++) {
                 // Cancelling leaves a group with fewer frames than groups.pq
                 // declares, which is worse than no session at all -- so remove
                 // what was written rather than leaving something that looks
                 // complete.
                 if (cancel && cancel->load(std::memory_order_relaxed)) {
-                    std::error_code ec;
-                    fs::remove_all(fs::path(tc.output_folder) / tc.split / tc.session_id, ec);
+                    remove_sessions();
                     if (status) *status = "Export cancelled; partial session removed.";
                     return false;
                 }
@@ -1203,7 +1320,7 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
                     return false;
                 }
                 char name[32];
-                snprintf(name, sizeof(name), "%06d.jpg", f - start);
+                snprintf(name, sizeof(name), "%06d.jpg", f - a);
                 if (!JarvisExport::write_jpeg((cdir / name).string().c_str(),
                                               reader.width(), reader.height(), 3,
                                               rgb, cfg.jpeg_quality)) {
@@ -1214,12 +1331,37 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
             }
         }
     }
+    for (size_t k = 1; k < st.sessions.size(); k++) {
+        for (const auto &grp : tc.groups) {
+            const fs::path src = first_session / "groups" / grp.id;
+            const fs::path dst = fs::path(st.sessions[k]) / "groups" / grp.id;
+            std::error_code ec;
+            fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::create_hard_links |
+                                   fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                ec.clear();
+                fs::copy(src, dst, fs::copy_options::recursive |
+                                       fs::copy_options::overwrite_existing, ec);
+            }
+            if (ec) {
+                if (status) *status = "Error: could not copy frames into " + dst.string() +
+                                      ": " + ec.message();
+                return false;
+            }
+        }
+    }
 
     if (status) {
-        *status = "Wrote " + tc.split + "/" + tc.session_id + " (" +
-                  std::to_string(n) + " frames, " + std::to_string(st.keypoint_rows) +
-                  " 2D rows, " + std::to_string(st.points3d_rows) + " 3D rows)" +
-                  ", frames extracted";
+        std::string names;
+        for (const auto &sdir : st.sessions) {
+            if (!names.empty()) names += ", ";
+            names += tc.split + "/" + fs::path(sdir).filename().string();
+        }
+        *status = "Wrote " + names + " (" + std::to_string(clip_frames) + " frames in " +
+                  std::to_string(clips.size()) + " group" + (clips.size() == 1 ? "" : "s") +
+                  ", " + std::to_string(st.keypoint_rows) + " 2D rows, " +
+                  std::to_string(st.points3d_rows) + " 3D rows, " +
+                  std::to_string(st.instance_rows) + " boxes), frames extracted";
     }
     return true;
 }

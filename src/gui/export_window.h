@@ -300,9 +300,11 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                     pm.media_folder.empty() ? "(none — images will not be extracted)" : pm.media_folder.c_str());
         ImGui::Text("Cameras:      %d", (int)pm.camera_names.size());
 
+        // Frames with keypoints or boxes: a detection-only project is still
+        // annotated, and the box exporters (YOLO, COCO, tailcycle) use it.
         int kp_count = 0;
         for (const auto &[f, fis] : amap)
-            if (any_instance_has_keypoints(fis)) ++kp_count;
+            if (any_instance_has_labels(fis)) ++kp_count;
         ImGui::Text("Annotated:    %d frames", kp_count);
 
         ImGui::SeparatorText("Output");

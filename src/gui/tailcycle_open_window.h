@@ -43,7 +43,7 @@ struct TailcycleOpenState {
     std::string open_source_video, open_units, open_labels;
     int      open_n_frames = 0, open_source_frame_start = 0;
     float    open_fps = 0.0f;
-    bool     open_has_2d = false, open_has_3d = false;
+    bool     open_has_2d = false, open_has_3d = false, open_has_boxes = false;
     std::vector<std::string> open_camera_names;
     std::vector<CameraParams> open_calibration;
     std::vector<std::string> open_node_names;
@@ -208,6 +208,7 @@ inline bool tailcycle_open_session(AppContext &ctx, const std::string &session_d
         remember->open_fps = s.fps;
         remember->open_has_2d = s.has_2d;
         remember->open_has_3d = s.has_3d;
+        remember->open_has_boxes = s.has_boxes;
         remember->open_camera_names = s.camera_names;
         remember->open_calibration = s.calibration;
         remember->open_node_names = s.node_names;
@@ -423,6 +424,7 @@ inline void DrawTailcycleDatasetWindow(TailcycleOpenState &state,
                     ImGui::TextUnformatted(si.has_2d && si.has_3d ? "2D+3D"
                                            : si.has_2d           ? "2D"
                                            : si.has_3d           ? "3D"
+                                           : si.has_boxes        ? "boxes"
                                                                  : "none");
                     ImGui::TableNextColumn(); ImGui::Text("%d", (int)si.groups.size());
                 }
@@ -450,6 +452,7 @@ inline void DrawTailcycleDatasetWindow(TailcycleOpenState &state,
                         state.open_has_2d && state.open_has_3d ? "2D+3D"
                         : state.open_has_2d                    ? "2D"
                         : state.open_has_3d                    ? "3D"
+                        : state.open_has_boxes                 ? "boxes"
                                                                : "no layers");
 
             // Only worth a control when there is a choice to make: a red

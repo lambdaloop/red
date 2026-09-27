@@ -640,8 +640,8 @@ int main(int argc, char **argv) {
         CHECK(it != nullptr, "instances.pq written when boxes exist");
         // 4 frames x 2 cameras labelled, plus the box-only animal.
         CHECK(it && it->num_rows() == 9, "one labeled row per keypoint view, plus the box-only one");
-        CHECK(it && (dict_values(it, "status") == std::set<std::string>{"labeled", "present"}),
-              "keypoint views are labeled; a box-only animal is present");
+        CHECK(it && (dict_values(it, "status") == std::set<std::string>{"labeled"}),
+              "keypoint views and a box-only animal are all labeled");
         bool box_ok = false, present_ok = false;
         for (int64_t r = 0; it && r < it->num_rows(); r++) {
             auto fcol = [&](const char *n) {
@@ -655,10 +655,10 @@ int main(int argc, char **argv) {
                          dict_at(it, "status", r) == "labeled";
             if (dict_at(it, "animal_id", r) == "a01")
                 present_ok = int_at(it, "frame", r) == 1 && dict_at(it, "camera", r) == "camB" &&
-                             dict_at(it, "status", r) == "present" && fcol("x1") == 150.0f;
+                             dict_at(it, "status", r) == "labeled" && fcol("x1") == 150.0f;
         }
         CHECK(box_ok, "box is [x0,x1) x [y0,y1) in image coordinates");
-        CHECK(present_ok, "box-only animal is written as present with its box");
+        CHECK(present_ok, "box-only animal is written as labeled with its box");
         CHECK(!fs::exists(T / "instances.pq"), "a session with no boxes gets no instances.pq");
 
         TailcycleImport::Session imported;
@@ -674,6 +674,50 @@ int main(int argc, char **argv) {
                     rt = e.bbox_x == 10 && e.bbox_y == 20 && e.bbox_w == 30 && e.bbox_h == 40;
                 }
         CHECK(rt, "box round-trips through instances.pq");
+    }
+
+    // ── 4d. a boxes-only project exports as a detection-only session ──
+    {
+        const std::string out = root + "/t4d";
+        auto cfg = make_config(out);
+        cfg.camera_names = {"camA"};
+        cfg.calibration.resize(1);
+        AnnotationMap amap;
+        for (u32 f : {1u, 3u}) {
+            FrameAnnotation fa = make_frame(NN, 1, f);
+            CameraExtras &e = fa.cameras[0].get_extras();
+            e.bbox_x = 5.0 * f; e.bbox_y = 6; e.bbox_w = 70; e.bbox_h = 80; e.has_bbox = true;
+            amap[f] = FrameInstances{std::move(fa)};
+        }
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "boxes-only export succeeds: " + status);
+        CHECK(st.sessions_written == 1 && st.instance_rows == 2, "one session, two box rows");
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        CHECK(fs::exists(d / "instances.pq") && !fs::exists(d / "keypoints.pq") &&
+              !fs::exists(d / "points3d.pq"),
+              "instances.pq is the only label table");
+        CHECK(slurp(d / "session.toml").find("labels = \"annotated\"") != std::string::npos,
+              "hand-drawn boxes make an annotated session");
+        auto it = read_pq(d / "instances.pq");
+        CHECK(it && (dict_values(it, "status") == std::set<std::string>{"labeled"}),
+              "box-only rows are labeled");
+
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &imported, &ist, &status),
+              "boxes-only session imports: " + status);
+        CHECK(imported.has_boxes && !imported.has_2d && !imported.has_3d && ist.instance_rows == 2,
+              "import reports a boxes-only session");
+        CHECK(imported.annotations.count(3) &&
+              imported.annotations.at(3).front().cameras[0].has_bbox() &&
+              imported.annotations.at(3).front().cameras[0].get_extras().bbox_x == 15.0,
+              "boxes round-trip without any keypoints");
+
+        std::vector<TailcycleImport::SessionInfo> infos;
+        CHECK(TailcycleImport::scan_dataset(out, &infos, &status) && infos.size() == 1 &&
+              infos[0].has_boxes, "scan lists the boxes-only session");
     }
 
     // ── 5. refusals: a file that loads cleanly and is wrong is worse than none ──

@@ -271,6 +271,7 @@ bool scan_dataset(const std::string &root, std::vector<SessionInfo> *out,
         std::sort(si.groups.begin(), si.groups.end());
         si.has_2d = fs::exists(d / "keypoints.pq");
         si.has_3d = fs::exists(d / "points3d.pq");
+        si.has_boxes = fs::exists(d / "instances.pq");
         // One row, so this is cheap even for a large session.
         if (auto gt = read_pq(d / "groups.pq")) {
             NumCol nf(gt, "n_frames");
@@ -544,6 +545,7 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
     // ── instances.pq ── boxes only. red has no model for `present`/`absent`
     // without a box, so those rows carry nothing it can hold.
     if (auto it = read_pq(D / "instances.pq")) {
+        out->has_boxes = true;
         DictCol cam(it, "camera"), aid(it, "animal_id"), gid(it, "group_id");
         NumCol fr(it, "frame"), x0(it, "x0"), y0(it, "y0"), x1(it, "x1"), y1(it, "y1");
         if (cam.ok && fr.ok && x0.ok && y0.ok && x1.ok && y1.ok) {
@@ -570,13 +572,16 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
         }
     }
 
-    if (!out->has_2d && !out->has_3d)
-        return fail("Session has neither keypoints.pq nor points3d.pq (§3).");
+    // §3 wants keypoints.pq or points3d.pq; red also writes (and so reads)
+    // detection-only sessions whose labels are boxes in instances.pq.
+    if (!out->has_2d && !out->has_3d && !out->has_boxes)
+        return fail("Session has no keypoints.pq, points3d.pq or instances.pq.");
     st.frames = (int)out->annotations.size();
     if (status) {
         *status = "Read " + out->session_id + "/" + out->group_id + ": " +
                   std::to_string(st.keypoint_rows) + " 2D rows, " +
                   std::to_string(st.points3d_rows) + " 3D rows, " +
+                  std::to_string(st.instance_rows) + " boxes, " +
                   std::to_string(st.frames) + " frames, " +
                   std::to_string(out->animal_ids.size()) + " animal(s)";
     }

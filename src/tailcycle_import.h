@@ -47,6 +47,7 @@ struct Session {
 
     bool has_2d = false;
     bool has_3d = false;
+    bool has_boxes = false;   // instances.pq present
 
     // The session's animal_ids, in order of first appearance. red's
     // instance_id is the index into this: the format's ids are strings
@@ -71,6 +72,7 @@ struct SessionInfo {
     int n_frames = 0;         // of the first group
     bool has_2d = false;      // keypoints.pq present
     bool has_3d = false;      // points3d.pq present
+    bool has_boxes = false;   // instances.pq present
 };
 
 // Walk <root>/<split>/<session>/ and summarise every session found. A session

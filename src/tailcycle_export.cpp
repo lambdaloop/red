@@ -199,10 +199,30 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         return buf;
     };
 
+    // Does this animal/view carry anything the chosen layers will write as a
+    // keypoint or 3D row? A box on a view that does not is a box-only
+    // annotation: detection data with no pose, exported on its own.
+    auto view_has_labels = [&](const FrameAnnotation &fa, size_t ci) {
+        if (cfg.layers != ExportConfig::Layers::ThreeD && ci < fa.cameras.size())
+            for (const auto &kp : fa.cameras[ci].keypoints)
+                if (kp.labeled || kp.occluded) return true;
+        if (cfg.layers != ExportConfig::Layers::TwoD)
+            for (const auto &k3 : fa.kp3d)
+                if (k3.source != Kp3DSource::None) return true;
+        return false;
+    };
+    auto has_box = [](const CameraAnnotation &cam) {
+        return cam.has_bbox() && cam.extras->bbox_w > 0 && cam.extras->bbox_h > 0;
+    };
+
     // ── which buckets actually have data ──
     bool has[2] = {false, false};
     for (const auto &[fnum, fis] : amap)
       for (const FrameAnnotation &fa : fis) {
+        // Boxes are drawn by hand; red has no box detector writing them.
+        for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++)
+            if (has_box(fa.cameras[ci]) && !view_has_labels(fa, ci))
+                has[(int)Bucket::Annotated] = true;
         for (const auto &cam : fa.cameras)
             for (const auto &kp : cam.keypoints)
                 if (kp.labeled || kp.occluded)
@@ -213,7 +233,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             has[(int)bucket_3d(k3.source)] = true;
         }
     }
-    if (!has[0] && !has[1]) return fail("Nothing to export: no labelled points.");
+    if (!has[0] && !has[1]) return fail("Nothing to export: no labelled points or boxes.");
 
     struct Job { Bucket b; const char *labels; std::string suffix; };
     std::vector<Job> jobs;
@@ -231,9 +251,8 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         jobs.push_back({Bucket::Tracked, Tailcycle::labels::kTracked, both ? "_tracked" : ""});
     if (jobs.empty()) return fail("Nothing selected to export.");
 
-    // A box on an animal with no keypoints in this session is still a human
-    // judgement. It goes with the hand annotations when there is such a
-    // session, otherwise with the first session written.
+    // A box-only annotation goes with the hand annotations when there is such
+    // a session, otherwise with the first session written.
     const Job *box_owner = &jobs.front();
     for (const Job &j : jobs)
         if (!forced && j.b == Bucket::Annotated) { box_owner = &j; break; }
@@ -430,9 +449,11 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         // Written only when red has at least one box to say something about;
         // an absent file is legal and claims nothing. When it is written,
         // every animal/view with keypoint rows gets a `labeled` row (box or
-        // not) so rule 11 holds. A box on an animal that has no keypoints
-        // in this camera and no 3D in this session is `present`: the animal
-        // is there but was not keypoint-annotated. red's bboxes are already
+        // not) so rule 11 holds. A box-only annotation is also `labeled`: it
+        // is a human-placed box, and `present` would make it an ignore region
+        // a detector never learns from. That departs from rule 11's "a labeled
+        // instance has at least one keypoint row" -- deliberately, so a
+        // detection-only dataset can be expressed. red's bboxes are already
         // top-left image coordinates, so only origin+extent -> [x0,x1) is
         // converted.
         //
@@ -453,15 +474,16 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 if (frame < 0 || frame >= cfg.n_frames) continue;
                 for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
                     const CameraAnnotation &cam = fa.cameras[ci];
-                    const bool box = cam.has_bbox() && cam.extras->bbox_w > 0 &&
-                                     cam.extras->bbox_h > 0;
+                    const bool box = has_box(cam);
                     const bool kp = kp_keys.count({frame, fa.instance_id, (int)ci}) > 0;
                     const bool p3 = p3_keys.count({frame, fa.instance_id}) > 0;
                     if (!kp && !box) continue;
-                    if (!kp && !p3 && &job != box_owner) continue;
+                    // A box whose keypoints went to the other session stays
+                    // with them; a box-only one goes to box_owner alone.
+                    const bool box_only = box && !view_has_labels(fa, ci);
+                    if (!kp && !p3 && !(box_only && &job == box_owner)) continue;
                     if (!written.insert({frame, fa.instance_id, (int)ci}).second) continue;
-                    const char *stt = (kp || p3) ? Tailcycle::status::kLabeled
-                                                 : Tailcycle::status::kPresent;
+                    const char *stt = Tailcycle::status::kLabeled;
                     if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
                         !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
                         !c_b.Append(cfg.camera_names[ci]).ok() || !s_b.Append(stt).ok() ||
@@ -498,10 +520,13 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             }
         }
 
-        // At least one of keypoints.pq / points3d.pq must exist and be
-        // non-empty (§3). Reaching here with neither means the bucket scan and
-        // the row loops disagreed, which is a bug rather than bad input.
-        if (!fs::exists(dir / "keypoints.pq") && !fs::exists(dir / "points3d.pq"))
+        // §3 asks for keypoints.pq or points3d.pq. red also accepts a session
+        // whose only labels are boxes in instances.pq -- a detection-only
+        // dataset -- which is a deliberate extension of the format. Reaching
+        // here with none of the three means the bucket scan and the row loops
+        // disagreed, which is a bug rather than bad input.
+        if (!fs::exists(dir / "keypoints.pq") && !fs::exists(dir / "points3d.pq") &&
+            !fs::exists(dir / "instances.pq"))
             return fail("Session " + sid + " would have no label table.");
 
         st.sessions.push_back(dir.string());

@@ -44,6 +44,17 @@ struct BBoxToolState {
 // Draw bbox rectangles on a camera's ImPlot view
 inline void bbox_draw_overlays(BBoxToolState &state, const AnnotationMap &amap,
                                 u32 frame, int cam_idx, int img_w, int img_h) {
+    // Draw in-progress bbox (while shift-dragging)
+    if (state.drawing) {
+        ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+        double dxs[] = {state.start_x, mouse.x, mouse.x, state.start_x, state.start_x};
+        double dys[] = {state.start_y, state.start_y, mouse.y, mouse.y, state.start_y};
+        ImVec4 c = state.class_colors[state.current_class];
+        ImPlotSpec nspec;
+        nspec.LineColor = c;
+        ImPlot::PlotLine("##bbox_new", dxs, dys, 5, nspec);
+    }
+
     auto it = amap.find(frame);
     if (it == amap.end() || it->second.empty()) return;
     // The bbox tools work on the animal being labelled; multi-animal boxes
@@ -88,17 +99,6 @@ inline void bbox_draw_overlays(BBoxToolState &state, const AnnotationMap &amap,
                  (ci < (int)state.class_names.size()) ? state.class_names[ci].c_str() : "?",
                  fa.instance_id);
         ImPlot::PlotText(label, x1 + 4, y2_plot - 4);
-    }
-
-    // Draw in-progress bbox (while shift-dragging)
-    if (state.drawing) {
-        ImPlotPoint mouse = ImPlot::GetPlotMousePos();
-        double dxs[] = {state.start_x, mouse.x, mouse.x, state.start_x, state.start_x};
-        double dys[] = {state.start_y, state.start_y, mouse.y, mouse.y, state.start_y};
-        ImVec4 c = state.class_colors[state.current_class];
-        ImPlotSpec nspec;
-        nspec.LineColor = c;
-        ImPlot::PlotLine("##bbox_new", dxs, dys, 5, nspec);
     }
 }
 

@@ -343,6 +343,11 @@ inline void on_project_loaded(AppContext &ctx,
                 ctx.scene, ctx.label_buffer_size, ctx.decoder_threads,
                 ctx.is_view_focused);
     const double t_videos = load_timing::ms(t_stage);
+    if (ctx.demuxers.empty()) {
+        ctx.popups.pushError("Could not load any videos from '" +
+                             ctx.pm.media_folder + "'.");
+        return;
+    }
     if (print_metadata_fn) print_metadata_fn();
     // The desync fix was requested by the project but the plan could not be
     // built/validated (load_videos already logged why) — playback continues

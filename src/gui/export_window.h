@@ -138,20 +138,50 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
         else if (!ctx.demuxers.empty() && ctx.demuxers[0])
             tc_total = (int)ctx.demuxers[0]->GetNumFrames();
 
-        // tailcycle-specific: one row per session, plus the 3D layer.
+        // tailcycle-specific: the label layers decide how sessions are named.
         if (fmt == ExportFormats::TAILCYCLE) {
-            if (state.tailcycle_session_id[0] == '\0')
-                snprintf(state.tailcycle_session_id,
-                         sizeof(state.tailcycle_session_id), "%s",
-                         pm.project_name.c_str());
-            ImGui::InputText("Session ID", state.tailcycle_session_id,
-                             sizeof(state.tailcycle_session_id));
+            static const char *kLayers[] = {"2D keypoints", "2D keypoints + 3D",
+                                            "3D only"};
+            ImGui::Combo("Labels", &state.tailcycle_layers, kLayers, 3);
             ImGui::SetItemTooltip(
-                "Becomes the folder name, which IS the session id. Shared by "
-                "every row below -- the split directory keeps them apart.");
+                "2D keypoints: one single-camera session per video, named after "
+                "the video. calibration.toml carries only the camera name and "
+                "image size.\n"
+                "2D + 3D: one multi-camera session with the calibration and "
+                "red's triangulated solve.\n"
+                "3D only: the honest choice when the 2D are themselves "
+                "reprojections of a 3D solve -- writing both would store the same "
+                "information twice.");
+
+            const bool per_video = state.tailcycle_layers == 0;
+            if (per_video) {
+                // A 2D session is exactly one camera, so the video names the
+                // session; a typed id would be shared by every video and collide.
+                std::string names;
+                for (size_t i = 0; i < pm.camera_names.size(); i++) {
+                    if (i) names += ", ";
+                    names += pm.camera_names[i];
+                }
+                ImGui::TextDisabled("Sessions: one per video, named after the file");
+                ImGui::TextWrapped("  %s", names.c_str());
+            } else {
+                if (state.tailcycle_session_id[0] == '\0')
+                    snprintf(state.tailcycle_session_id,
+                             sizeof(state.tailcycle_session_id), "%s",
+                             pm.project_name.c_str());
+                ImGui::InputText("Session ID", state.tailcycle_session_id,
+                                 sizeof(state.tailcycle_session_id));
+                ImGui::SetItemTooltip(
+                    "Becomes the folder name, which IS the session id. Shared by "
+                    "every row below -- the split directory keeps them apart.");
+            }
 
             ImGui::SeparatorText("Splits");
-            ImGui::TextDisabled("One session per row. End at 0 means to the end of the recording (%d frames).",
+            ImGui::TextDisabled(per_video
+                                    ? "One split per row, each holding every video's session. "
+                                      "End at 0 means to the end of the recording (%d frames)."
+                                    : "One session per row. End at 0 means to the end of the "
+                                      "recording (%d frames).",
                                 tc_total);
             ImGui::TextDisabled(
                 "Frames are extracted into each group, so the dataset is "
@@ -220,19 +250,6 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
             if (!range_err.empty())
                 ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s", range_err.c_str());
             state.tailcycle_range_error = range_err;
-
-            ImGui::Spacing();
-            static const char *kLayers[] = {"2D keypoints", "2D keypoints + 3D",
-                                            "3D only"};
-            ImGui::Combo("Labels", &state.tailcycle_layers, kLayers, 3);
-            ImGui::SetItemTooltip(
-                "2D keypoints: per-camera labels plus the calibration, and a "
-                "consumer triangulates for itself.\n"
-                "2D + 3D: also ships red's triangulated solve, for a consumer that "
-                "wants these exact numbers rather than its own.\n"
-                "3D only: the honest choice when the 2D are themselves "
-                "reprojections of a 3D solve -- writing both would store the same "
-                "information twice.");
 
         }
 

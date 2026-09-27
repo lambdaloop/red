@@ -959,10 +959,11 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
                       "found at configure time).";
         return false;
     }
-    // A 2D Tailcycle session describes exactly one camera. When red's project
-    // has several independent video files, export one child session per file
-    // while retaining the shared dataset root and split directory.
-    if (cfg.tailcycle_layers == 0 && cfg.camera_names.size() > 1) {
+    // A 2D Tailcycle session describes exactly one camera, so a 2D export is
+    // one session per video file, named after the video, under the shared
+    // <dataset>/<split>/. Each child sets tailcycle_source_video, which is
+    // what stops it from re-entering this branch.
+    if (cfg.tailcycle_layers == 0 && cfg.tailcycle_source_video.empty()) {
         struct VideoSession {
             size_t camera_index;
             std::string path;

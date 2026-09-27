@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -973,9 +974,34 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
             int height;
             float fps;
         };
+        // A video with nothing labelled in the export range has no session to
+        // write: export_session would refuse it, and one unlabelled camera
+        // must not sink the others. Such videos are skipped, not extracted.
+        const int range_start = std::max(0, cfg.tailcycle_frame_start);
+        const int range_end = cfg.tailcycle_frame_end > 0 ? cfg.tailcycle_frame_end : INT_MAX;
+        auto camera_has_labels = [&](size_t ci) {
+            for (const auto &[fnum, fis] : amap) {
+                if ((int)fnum < range_start || (int)fnum > range_end) continue;
+                for (const FrameAnnotation &fa : fis) {
+                    if (ci >= fa.cameras.size()) continue;
+                    const CameraAnnotation &cam = fa.cameras[ci];
+                    for (const auto &kp : cam.keypoints)
+                        if (keypoint2d_assessed(kp)) return true;
+                    if (cam.has_bbox() && cam.extras->bbox_w > 0 && cam.extras->bbox_h > 0)
+                        return true;
+                }
+            }
+            return false;
+        };
+
         std::vector<VideoSession> videos;
+        std::vector<std::string> skipped;
         std::set<std::string> ids;
         for (size_t i = 0; i < cfg.camera_names.size(); ++i) {
+            if (!camera_has_labels(i)) {
+                skipped.push_back(cfg.camera_names[i]);
+                continue;
+            }
             const std::string path = camera_video_path(cfg.media_folder, cfg.camera_names[i]);
             if (path.empty() || !fs::exists(path)) {
                 if (status) *status = "Error: no video for camera " + cfg.camera_names[i];
@@ -1005,6 +1031,12 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
             }
             videos.push_back({i, path, id, frames, reader.width(), reader.height(),
                               (float)reader.fps()});
+        }
+
+        if (videos.empty()) {
+            if (status) *status = "Error: nothing to export -- no video has labelled points or boxes"
+                                  " in the selected frame range.";
+            return false;
         }
 
         for (const VideoSession &video : videos) {
@@ -1047,8 +1079,16 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
             }
             if (!export_tailcycle(one, one_camera, status, img_counter, cancel)) return false;
         }
-        if (status) *status = "Wrote " + std::to_string(videos.size()) +
-                              " 2D sessions under " + cfg.output_folder + "/" + cfg.tailcycle_split;
+        if (status) {
+            *status = "Wrote " + std::to_string(videos.size()) + " 2D session" +
+                      (videos.size() == 1 ? "" : "s") + " under " + cfg.output_folder + "/" +
+                      cfg.tailcycle_split;
+            if (!skipped.empty()) {
+                *status += "; skipped " + std::to_string(skipped.size()) +
+                           " video(s) with no labels:";
+                for (const auto &n : skipped) *status += " " + n;
+            }
+        }
         return true;
     }
 

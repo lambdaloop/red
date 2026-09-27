@@ -417,7 +417,26 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                                                  : (tc_total > 0 ? tc_total - 1 : r.start);
                             if (last >= r.start) tc_frames += last - r.start + 1;
                         }
-                        state.images_total = tc_frames * (int)pm.camera_names.size();
+                        // A 2D export extracts only videos that carry labels.
+                        int tc_cams = (int)pm.camera_names.size();
+                        if (state.tailcycle_layers == 0) {
+                            tc_cams = 0;
+                            for (size_t ci = 0; ci < pm.camera_names.size(); ci++) {
+                                bool any = false;
+                                for (const auto &[f, fis] : amap) {
+                                    for (const auto &fa : fis) {
+                                        if (ci >= fa.cameras.size()) continue;
+                                        const auto &cam = fa.cameras[ci];
+                                        for (const auto &kp : cam.keypoints)
+                                            if (keypoint2d_assessed(kp)) any = true;
+                                        if (cam.has_bbox()) any = true;
+                                    }
+                                    if (any) break;
+                                }
+                                if (any) ++tc_cams;
+                            }
+                        }
+                        state.images_total = tc_frames * tc_cams;
                     } else {
                         state.images_total = kp_count * (int)pm.camera_names.size();
                     }

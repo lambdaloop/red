@@ -47,6 +47,7 @@ struct Session {
 
     bool has_2d = false;
     bool has_3d = false;
+    bool has_boxes = false;   // instances.pq
 
     // The session's animal_ids, in order of first appearance. red's
     // instance_id is the index into this: the format's ids are strings

@@ -364,6 +364,9 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
             if (K.size() >= 9)
                 for (int a = 0; a < 3; a++)
                     for (int b = 0; b < 3; b++) c.k(a, b) = K[a * 3 + b];
+            else if (size.size() >= 2)   // §5: a 2D camera may omit it; nominal pinhole
+                c.k << std::max(size[0], size[1]), 0, size[0] / 2, 0,
+                       std::max(size[0], size[1]), size[1] / 2, 0, 0, 1;
             for (size_t j = 0; j < d.size() && j < 5; j++) c.dist_coeffs(j) = d[j];
             if (r.size() >= 3) {
                 c.rvec = Eigen::Vector3d(r[0], r[1], r[2]);
@@ -565,8 +568,29 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
         }
     }
 
-    if (!out->has_2d && !out->has_3d)
-        return fail("Session has neither keypoints.pq nor points3d.pq (§3).");
+    // ── instances.pq ── boxes only; red has no model for `present`/`absent`.
+    if (auto it = read_pq(D / "instances.pq")) {
+        out->has_boxes = true;
+        DictCol cam(it, "camera"), aid(it, "animal_id"), gid(it, "group_id");
+        NumCol fr(it, "frame"), x0(it, "x0"), y0(it, "y0"), x1(it, "x1"), y1(it, "y1");
+        for (size_t i = 0; cam.ok && fr.ok && x0.ok && y0.ok && x1.ok && y1.ok &&
+                           i < fr.vals.size(); i++) {
+            if (gid.ok && gid.vals[i] != out->group_id) continue;
+            if (x0.null[i] || y0.null[i] || x1.null[i] || y1.null[i]) continue;
+            const int f = (int)fr.vals[i], ci = name_index(out->camera_names, cam.vals[i]);
+            if (f < 0 || f >= out->n_frames || ci < 0) continue;
+            CameraExtras &e = frame_of((u32)f, instance_of(aid.ok ? aid.vals[i] : "a00"))
+                                  .cameras[ci].get_extras();
+            e.bbox_x = x0.vals[i];
+            e.bbox_y = y0.vals[i];
+            e.bbox_w = x1.vals[i] - x0.vals[i];
+            e.bbox_h = y1.vals[i] - y0.vals[i];
+            e.has_bbox = true;
+        }
+    }
+
+    if (!out->has_2d && !out->has_3d && !out->has_boxes)
+        return fail("Session has no keypoints.pq, points3d.pq or instances.pq.");
     st.frames = (int)out->annotations.size();
     if (status) {
         *status = "Read " + out->session_id + "/" + out->group_id + ": " +

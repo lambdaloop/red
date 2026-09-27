@@ -12,7 +12,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <system_error>
+#include <tuple>
 #endif
 
 namespace TailcycleExport {
@@ -116,6 +118,10 @@ bool write_session_toml(const fs::path &dir, const ExportConfig &cfg,
     return true;
 }
 
+bool minimal_2d(const ExportConfig &cfg) {
+    return cfg.camera_names.size() == 1 && cfg.layers == ExportConfig::Layers::TwoD;
+}
+
 bool write_calibration_toml(const fs::path &dir, const ExportConfig &cfg, std::string *err) {
     std::ofstream o(dir / "calibration.toml");
     if (!o) { *err = "cannot write calibration.toml"; return false; }
@@ -125,6 +131,10 @@ bool write_calibration_toml(const fs::path &dir, const ExportConfig &cfg, std::s
         o << "[cam_" << i << "]\n";
         o << "name = " << toml_str(cfg.camera_names[i]) << "\n";
         o << "size = [ " << c.image_width << ", " << c.image_height << ",]\n";
+        if (minimal_2d(cfg)) {   // §5: a 2D camera needs only name, size, offset
+            o << "offset = [ 0.0, 0.0,]\n\n";
+            continue;
+        }
         o << "matrix = [";
         for (int r = 0; r < 3; r++) {
             o << " [ ";
@@ -164,16 +174,17 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     if (cfg.calibration.size() != cfg.camera_names.size())
         return fail("Calibration count does not match camera count.");
     if (cfg.node_names.empty()) return fail("Skeleton has no keypoint names.");
-    if (cfg.n_frames <= 0) return fail("n_frames must come from the media and be > 0.");
+    if (cfg.groups.empty() && cfg.n_frames <= 0)
+        return fail("n_frames must come from the media and be > 0.");
 
     for (size_t i = 0; i < cfg.calibration.size(); i++) {
         const CameraParams &c = cfg.calibration[i];
         const std::string &n = cfg.camera_names[i];
-        if (c.telecentric)
+        if (c.telecentric && !minimal_2d(cfg))
             return fail("Camera " + n + " is telecentric. calibration.toml is an aniposelib "
                         "CameraGroup, which has no telecentric model -- the file would load "
                         "cleanly and triangulate wrongly.");
-        if (!rotation_is_proper(c.r))
+        if (!rotation_is_proper(c.r) && !minimal_2d(cfg))
             return fail("Camera " + n + " has an improper rotation (det != 1), which has no "
                         "Rodrigues representation.");
         if (c.image_width <= 0 || c.image_height <= 0)
@@ -181,6 +192,17 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     }
 
     const std::string gid = cfg.group_id.empty() ? cfg.session_id : cfg.group_id;
+    std::vector<ExportConfig::Group> groups = cfg.groups;
+    if (groups.empty()) groups.push_back({gid, cfg.n_frames, cfg.source_frame_start});
+    // The group holding red frame `fnum`, with `*frame` set to its index there.
+    auto locate = [&](u32 fnum, int *frame) -> const ExportConfig::Group * {
+        for (const auto &g : groups)
+            if ((int)fnum >= g.source_frame_start && (int)fnum < g.source_frame_start + g.n_frames) {
+                *frame = (int)fnum - g.source_frame_start;
+                return &g;
+            }
+        return nullptr;
+    };
     // The format keys every row by (group, frame, animal, camera, bodypart),
     // so an id shared between animals is not a cosmetic problem: the rows
     // collide, and a reader keeping the last one per key silently keeps one
@@ -194,10 +216,28 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         return buf;
     };
 
+    auto has_box = [](const CameraAnnotation &cam) {
+        return cam.has_bbox() && cam.extras->bbox_w > 0 && cam.extras->bbox_h > 0;
+    };
+    // A box on a view with no keypoint or 3D row to write is a box-only
+    // (detection) label; it goes in the annotated session.
+    auto box_only = [&](const FrameAnnotation &fa, size_t ci) {
+        if (!has_box(fa.cameras[ci])) return false;
+        if (cfg.layers != ExportConfig::Layers::ThreeD)
+            for (const auto &kp : fa.cameras[ci].keypoints)
+                if (keypoint2d_assessed(kp)) return false;
+        if (cfg.layers != ExportConfig::Layers::TwoD)
+            for (const auto &k3 : fa.kp3d)
+                if (k3.exist) return false;
+        return true;
+    };
+
     // ── which buckets actually have data ──
     bool has[2] = {false, false};
     for (const auto &[fnum, fis] : amap)
       for (const FrameAnnotation &fa : fis) {
+        for (size_t ci = 0; ci < fa.cameras.size(); ci++)
+            if (box_only(fa, ci)) has[(int)Bucket::Annotated] = true;
         for (const auto &cam : fa.cameras)
             for (const auto &kp : cam.keypoints)
                 if (keypoint2d_assessed(kp))
@@ -208,7 +248,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             has[(int)bucket_3d(k3)] = true;
         }
     }
-    if (!has[0] && !has[1]) return fail("Nothing to export: no labelled points.");
+    if (!has[0] && !has[1]) return fail("Nothing to export: no labelled points or boxes.");
 
     struct Job { Bucket b; const char *labels; std::string suffix; };
     std::vector<Job> jobs;
@@ -239,7 +279,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             if (!fs::is_directory(dir))
                 return fail("Session folder is gone: " + dir.string());
         } else {
-            fs::create_directories(dir / "groups" / gid, ec);
+            for (const auto &g : groups) fs::create_directories(dir / "groups" / g.id, ec);
             if (ec) return fail("Cannot create " + dir.string() + ": " + ec.message());
         }
 
@@ -260,12 +300,14 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 arrow::StringBuilder gid_b, src_b, notes_b;
                 arrow::Int32Builder nf_b, start_b, step_b;
                 arrow::FloatBuilder fps_b;
-                auto ok = gid_b.Append(gid).ok() && nf_b.Append(cfg.n_frames).ok() &&
-                          src_b.Append(cfg.source_video).ok() &&
-                          start_b.Append(cfg.source_frame_start).ok() && step_b.Append(1).ok() &&
-                          notes_b.Append("").ok() &&
-                          (cfg.fps > 0 ? fps_b.Append(cfg.fps).ok() : fps_b.AppendNull().ok());
-                if (!ok) return fail("groups.pq: builder append failed.");
+                for (const auto &g : groups) {
+                    auto ok = gid_b.Append(g.id).ok() && nf_b.Append(g.n_frames).ok() &&
+                              src_b.Append(cfg.source_video).ok() &&
+                              start_b.Append(g.source_frame_start).ok() && step_b.Append(1).ok() &&
+                              notes_b.Append("").ok() &&
+                              (cfg.fps > 0 ? fps_b.Append(cfg.fps).ok() : fps_b.AppendNull().ok());
+                    if (!ok) return fail("groups.pq: builder append failed.");
+                }
                 std::vector<std::shared_ptr<arrow::Array>> a(7);
                 if (!gid_b.Finish(&a[0]).ok() || !nf_b.Finish(&a[1]).ok() || !fps_b.Finish(&a[2]).ok() ||
                     !src_b.Finish(&a[3]).ok() || !start_b.Finish(&a[4]).ok() ||
@@ -276,6 +318,11 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 if (!s.ok()) return fail("groups.pq: " + s.ToString());
             }
         }
+
+        // Views with a keypoint row and animals with a 3D row in this session:
+        // instances.pq gives each a `labeled` row (rule 11).
+        std::set<std::tuple<u32, int, size_t>> kp_keys;
+        std::set<std::pair<u32, int>> p3_keys;
 
         // ── keypoints.pq ──
         // Red keeps the user provenance (`Manual`) as `visible`, even when a
@@ -291,8 +338,9 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
 
             for (const auto &[fnum, fis] : amap)
       for (const FrameAnnotation &fa : fis) {
-                const int frame = (int)fnum - cfg.source_frame_start;
-                if (frame < 0 || frame >= cfg.n_frames) continue;   // rule 6
+                int frame = 0;
+                const ExportConfig::Group *grp = locate(fnum, &frame);
+                if (!grp) continue;   // rule 6
                 if (cfg.layers == ExportConfig::Layers::ThreeD) break;
                 for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
                     const auto &cam = fa.cameras[ci];
@@ -310,7 +358,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                             continue;   // no row, not `unlabeled` (§7)
                         if (cfg.force_labels.empty() &&
                             bucket_2d(kp) != job.b) continue;
-                        if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
+                        if (!g_b.Append(grp->id).ok() || !f_b.Append(frame).ok() ||
                             !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
                             !c_b.Append(cfg.camera_names[ci]).ok() ||
                             !p_b.Append(cfg.node_names[ni]).ok() ||
@@ -346,6 +394,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                         if (scored) any_score = true;
                         if (!(scored ? sc_b.Append(kp.confidence) : sc_b.AppendNull()).ok())
                             return fail("keypoints.pq: score append failed.");
+                        kp_keys.insert({fnum, fa.instance_id, ci});
                         rows++;
                     }
                 }
@@ -377,15 +426,16 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
 
             for (const auto &[fnum, fis] : amap)
       for (const FrameAnnotation &fa : fis) {
-                const int frame = (int)fnum - cfg.source_frame_start;
-                if (frame < 0 || frame >= cfg.n_frames) continue;
+                int frame = 0;
+                const ExportConfig::Group *grp = locate(fnum, &frame);
+                if (!grp) continue;
                 for (size_t ni = 0; ni < fa.kp3d.size() && ni < cfg.node_names.size(); ni++) {
                     const Keypoint3D &k3 = fa.kp3d[ni];
                     if (!k3.exist) continue;
                     if (cfg.layers == ExportConfig::Layers::TwoD) continue;
                     if (cfg.force_labels.empty() &&
                         bucket_3d(k3) != job.b) continue;
-                    if (!g_b.Append(gid).ok() || !f_b.Append(frame).ok() ||
+                    if (!g_b.Append(grp->id).ok() || !f_b.Append(frame).ok() ||
                         !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
                         !p_b.Append(cfg.node_names[ni]).ok() ||
                         !s_b.Append(Tailcycle::status::kVisible).ok() ||
@@ -396,6 +446,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                     if (scored) any_score = true;
                     if (!(scored ? sc_b.Append(k3.confidence) : sc_b.AppendNull()).ok())
                         return fail("points3d.pq: score append failed.");
+                    p3_keys.insert({fnum, fa.instance_id});
                     rows++;
                 }
             }
@@ -416,10 +467,63 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             }
         }
 
-        // At least one of keypoints.pq / points3d.pq must exist and be
-        // non-empty (§3). Reaching here with neither means the bucket scan and
-        // the row loops disagreed, which is a bug rather than bad input.
-        if (!fs::exists(dir / "keypoints.pq") && !fs::exists(dir / "points3d.pq"))
+        // ── instances.pq (§9) ── written only when there are boxes. Every view
+        // with keypoint rows gets a `labeled` row (rule 11); a box-only view is a
+        // `labeled` detection label. Skipped in place: red cannot hold
+        // `present`/`absent` rows, so rewriting the file would drop them.
+        if (!cfg.in_place) {
+            arrow::StringDictionary32Builder g_b, a_b, c_b, s_b;
+            arrow::Int32Builder f_b;
+            arrow::FloatBuilder x0_b, y0_b, x1_b, y1_b;
+            arrow::StringBuilder n_b;
+            bool any_box = false;
+            int rows = 0;
+            for (const auto &[fnum, fis] : amap)
+      for (const FrameAnnotation &fa : fis) {
+                int frame = 0;
+                const ExportConfig::Group *grp = locate(fnum, &frame);
+                if (!grp) continue;
+                for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
+                    const bool box = has_box(fa.cameras[ci]);
+                    if (!kp_keys.count({fnum, fa.instance_id, ci}) &&
+                        !(box && (p3_keys.count({fnum, fa.instance_id}) ||
+                                  (job.b == Bucket::Annotated && box_only(fa, ci)))))
+                        continue;
+                    const CameraExtras &e = fa.cameras[ci].get_extras();
+                    auto coord = [&](arrow::FloatBuilder &b, double v) {
+                        return (box ? b.Append((float)v) : b.AppendNull()).ok();
+                    };
+                    any_box |= box;
+                    if (!g_b.Append(grp->id).ok() || !f_b.Append(frame).ok() ||
+                        !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
+                        !c_b.Append(cfg.camera_names[ci]).ok() ||
+                        !s_b.Append(Tailcycle::status::kLabeled).ok() || !n_b.AppendNull().ok() ||
+                        !coord(x0_b, e.bbox_x) || !coord(y0_b, e.bbox_y) ||
+                        !coord(x1_b, e.bbox_x + e.bbox_w) || !coord(y1_b, e.bbox_y + e.bbox_h))
+                        return fail("instances.pq: builder append failed.");
+                    rows++;
+                }
+            }
+            if (any_box) {
+                std::vector<std::shared_ptr<arrow::Array>> a(10);
+                if (!g_b.Finish(&a[0]).ok() || !f_b.Finish(&a[1]).ok() || !a_b.Finish(&a[2]).ok() ||
+                    !c_b.Finish(&a[3]).ok() || !x0_b.Finish(&a[4]).ok() || !y0_b.Finish(&a[5]).ok() ||
+                    !x1_b.Finish(&a[6]).ok() || !y1_b.Finish(&a[7]).ok() || !s_b.Finish(&a[8]).ok() ||
+                    !n_b.Finish(&a[9]).ok())
+                    return fail("instances.pq: finish failed.");
+                auto s = Tailcycle::write_table(
+                    arrow::Table::Make(Tailcycle::instances_schema(), a),
+                    (dir / "instances.pq").string());
+                if (!s.ok()) return fail("instances.pq: " + s.ToString());
+                st.instance_rows += rows;
+            }
+        }
+
+        // Some label table must exist (a box-only session has only
+        // instances.pq). Reaching here with none means the bucket scan and the
+        // row loops disagreed, which is a bug rather than bad input.
+        if (!fs::exists(dir / "keypoints.pq") && !fs::exists(dir / "points3d.pq") &&
+            !fs::exists(dir / "instances.pq"))
             return fail("Session " + sid + " would have no label table.");
 
         st.sessions.push_back(dir.string());

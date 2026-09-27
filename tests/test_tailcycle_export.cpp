@@ -593,6 +593,178 @@ int main(int argc, char **argv) {
               "red's absolute frame_number becomes a 0-based index into the group");
     }
 
+    // ── 4b. single-camera 2D uses only the required calibration metadata ──
+    {
+        const std::string out = root + "/t4b";
+        auto cfg = make_config(out);
+        cfg.camera_names = {"camA"};
+        cfg.calibration.resize(1);
+        cfg.layers = TailcycleExport::ExportConfig::Layers::TwoD;
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, make_annotations(), &st, &status),
+              "minimal 2D export succeeds without measured calibration: " + status);
+        const fs::path d = fs::path(out) / "train" / "sess1_annotated";
+        const std::string calib = slurp(d / "calibration.toml");
+        CHECK(calib.find("name = \"camA\"") != std::string::npos &&
+              calib.find("size = [ 1280, 960,") != std::string::npos &&
+              calib.find("offset = [ 0.0, 0.0,") != std::string::npos,
+              "2D calibration retains the required name, size, and zero offset");
+        CHECK(calib.find("matrix =") == std::string::npos &&
+              calib.find("rotation =") == std::string::npos &&
+              calib.find("translation =") == std::string::npos,
+              "2D calibration does not invent camera geometry");
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &imported, &ist, &status),
+              "minimal 2D session imports: " + status);
+        CHECK(imported.mode == "2d" && imported.camera_names == std::vector<std::string>{"camA"},
+              "2D camera identity survives round-trip");
+        CHECK(imported.calibration.size() == 1 && imported.calibration[0].image_width == 1280 &&
+              imported.calibration[0].image_height == 960 &&
+              std::abs(imported.calibration[0].k(0, 0) - 1280.0) < 1e-9,
+              "image size and nominal pinhole survive round-trip");
+    }
+
+    // ── 4c. boxes go to instances.pq, keyed so rule 11 holds ──
+    {
+        const std::string out = root + "/t4c";
+        auto cfg = make_config(out);
+        AnnotationMap amap = make_annotations();
+        {
+            CameraExtras &e = amap.at(0).front().cameras[0].get_extras();
+            e.bbox_x = 10; e.bbox_y = 20; e.bbox_w = 30; e.bbox_h = 40; e.has_bbox = true;
+        }
+        {
+            // A second animal with a box and nothing else.
+            FrameAnnotation boxed = make_frame(NN, NC, 1, /*instance_id=*/1);
+            CameraExtras &e = boxed.cameras[1].get_extras();
+            e.bbox_x = 100; e.bbox_y = 110; e.bbox_w = 50; e.bbox_h = 60; e.has_bbox = true;
+            amap.at(1).push_back(std::move(boxed));
+        }
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "export with boxes succeeds: " + status);
+        const fs::path A = fs::path(out) / "train" / "sess1_annotated";
+        const fs::path T = fs::path(out) / "train" / "sess1_tracked";
+        auto it = read_pq(A / "instances.pq");
+        CHECK(it != nullptr, "instances.pq written when boxes exist");
+        // 4 frames x 2 cameras labelled, plus the box-only animal.
+        CHECK(it && it->num_rows() == 9, "one labeled row per keypoint view, plus the box-only one");
+        CHECK(it && (dict_values(it, "status") == std::set<std::string>{"labeled"}),
+              "keypoint views and a box-only animal are all labeled");
+        bool box_ok = false, present_ok = false;
+        for (int64_t r = 0; it && r < it->num_rows(); r++) {
+            auto fcol = [&](const char *n) {
+                auto a = std::static_pointer_cast<arrow::FloatArray>(it->GetColumnByName(n)->chunk(0));
+                return a->IsNull(r) ? -1.0f : a->Value(r);
+            };
+            if (int_at(it, "frame", r) == 0 && dict_at(it, "camera", r) == "camA" &&
+                dict_at(it, "animal_id", r) == "a00")
+                box_ok = fcol("x0") == 10.0f && fcol("y0") == 20.0f &&
+                         fcol("x1") == 40.0f && fcol("y1") == 60.0f &&
+                         dict_at(it, "status", r) == "labeled";
+            if (dict_at(it, "animal_id", r) == "a01")
+                present_ok = int_at(it, "frame", r) == 1 && dict_at(it, "camera", r) == "camB" &&
+                             dict_at(it, "status", r) == "labeled" && fcol("x1") == 150.0f;
+        }
+        CHECK(box_ok, "box is [x0,x1) x [y0,y1) in image coordinates");
+        CHECK(present_ok, "box-only animal is written as labeled with its box");
+        CHECK(!fs::exists(T / "instances.pq"), "a session with no boxes gets no instances.pq");
+
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(A.string(), "sess1", &imported, &ist, &status),
+              "session with instances.pq imports: " + status);
+        bool rt = false;
+        if (imported.annotations.count(0))
+            for (const auto &fa : imported.annotations.at(0))
+                if (fa.instance_id == 0 && fa.cameras[0].has_bbox()) {
+                    const auto &e = fa.cameras[0].get_extras();
+                    rt = e.bbox_x == 10 && e.bbox_y == 20 && e.bbox_w == 30 && e.bbox_h == 40;
+                }
+        CHECK(rt, "box round-trips through instances.pq");
+    }
+
+    // ── 4d. a boxes-only project exports as a detection-only session ──
+    {
+        const std::string out = root + "/t4d";
+        auto cfg = make_config(out);
+        cfg.camera_names = {"camA"};
+        cfg.calibration.resize(1);
+        AnnotationMap amap;
+        for (u32 f : {1u, 3u}) {
+            FrameAnnotation fa = make_frame(NN, 1, f);
+            CameraExtras &e = fa.cameras[0].get_extras();
+            e.bbox_x = 5.0 * f; e.bbox_y = 6; e.bbox_w = 70; e.bbox_h = 80; e.has_bbox = true;
+            amap[f] = FrameInstances{std::move(fa)};
+        }
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "boxes-only export succeeds: " + status);
+        CHECK(st.sessions_written == 1 && st.instance_rows == 2, "one session, two box rows");
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        CHECK(fs::exists(d / "instances.pq") && !fs::exists(d / "keypoints.pq") &&
+              !fs::exists(d / "points3d.pq"),
+              "instances.pq is the only label table");
+        CHECK(slurp(d / "session.toml").find("labels = \"annotated\"") != std::string::npos,
+              "hand-drawn boxes make an annotated session");
+        auto it = read_pq(d / "instances.pq");
+        CHECK(it && (dict_values(it, "status") == std::set<std::string>{"labeled"}),
+              "box-only rows are labeled");
+
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &imported, &ist, &status),
+              "boxes-only session imports: " + status);
+        CHECK(imported.has_boxes && !imported.has_2d && !imported.has_3d,
+              "import reports a boxes-only session");
+        CHECK(imported.annotations.count(3) &&
+              imported.annotations.at(3).front().cameras[0].has_bbox() &&
+              imported.annotations.at(3).front().cameras[0].get_extras().bbox_x == 15.0,
+              "boxes round-trip without any keypoints");
+
+    }
+
+    // ── 4e. several clips of one recording become several groups ──
+    {
+        const std::string out = root + "/t4e";
+        auto cfg = make_config(out);
+        cfg.force_labels = "annotated";
+        // red frames 100..104 are labelled; clips cover 100-101 and 103-104,
+        // so frame 102 falls between groups and is not exported.
+        cfg.groups = {{"rec_ix100", 2, 100}, {"rec_ix103", 2, 103}};
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, make_annotations(100), &st, &status),
+              "multi-group export succeeds: " + status);
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        CHECK(fs::is_directory(d / "groups" / "rec_ix100") &&
+              fs::is_directory(d / "groups" / "rec_ix103"), "one folder per group");
+        auto g = read_pq(d / "groups.pq");
+        CHECK(g && g->num_rows() == 2, "one groups.pq row per group");
+        CHECK(g && int_at(g, "source_frame_start", 0) == 100 && int_at(g, "n_frames", 0) == 2 &&
+              int_at(g, "source_frame_start", 1) == 103, "one groups.pq row per group, in order");
+        auto k = read_pq(d / "keypoints.pq");
+        CHECK(k && dict_values(k, "group_id") == (std::set<std::string>{"rec_ix100", "rec_ix103"}),
+              "rows are keyed by their own group");
+        bool rebased = true;
+        for (int64_t r = 0; k && r < k->num_rows(); r++)
+            if (int_at(k, "frame", r) < 0 || int_at(k, "frame", r) > 1) rebased = false;
+        CHECK(rebased, "frames are rebased into each group");
+        // 2 cameras x 3 nodes on frames 100, 101, 103 (frame 103 lacks TailBase) + 104
+        CHECK(k && k->num_rows() == 6 + 6 + 4 + 6, "frame 102, between groups, is dropped");
+
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "rec_ix103", &imported, &ist, &status),
+              "a group of a multi-group session imports: " + status);
+        CHECK(imported.n_frames == 2 && imported.source_frame_start == 103 &&
+              imported.annotations.size() == 2, "the chosen group's frames only");
+    }
+
     // ── 5. refusals: a file that loads cleanly and is wrong is worse than none ──
     {
         auto cfg = make_config(root + "/t5");

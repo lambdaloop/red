@@ -41,6 +41,10 @@ struct ExportConfig {
     float fps = 0.0f;
     int source_frame_start = 0;     // red's frame_number is absolute; §6 rebases
     std::string source_video;
+    // Several clips of the recording, each its own group. Replaces the single
+    // group above when non-empty; a label in no group is not exported.
+    struct Group { std::string id; int n_frames = 0; int source_frame_start = 0; };
+    std::vector<Group> groups;
 
     std::string units = "mm";
 

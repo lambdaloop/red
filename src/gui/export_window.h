@@ -44,6 +44,8 @@ struct ExportWindowState {
     std::vector<TailcycleRange> tailcycle_ranges{{}};
     char tailcycle_session_id[128] = "";
     int tailcycle_layers = 0;   // 2D | 2D+3D | 3D only
+    bool tailcycle_around_labels = false;
+    int tailcycle_window = 32;  // clip frames around each label
     std::string tailcycle_range_error;
     bool include_video_index = false; // JARVIS: include video_index.json
     int scale_factor = 1; // JARVIS: write calibration so 3D reconstructs in (mm × scale_factor)
@@ -140,15 +142,19 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
 
         // tailcycle-specific: one row per session, plus the 3D layer.
         if (fmt == ExportFormats::TAILCYCLE) {
-            if (state.tailcycle_session_id[0] == '\0')
-                snprintf(state.tailcycle_session_id,
-                         sizeof(state.tailcycle_session_id), "%s",
-                         pm.project_name.c_str());
-            ImGui::InputText("Session ID", state.tailcycle_session_id,
-                             sizeof(state.tailcycle_session_id));
-            ImGui::SetItemTooltip(
-                "Becomes the folder name, which IS the session id. Shared by "
-                "every row below -- the split directory keeps them apart.");
+            if (state.tailcycle_layers == 0) {
+                ImGui::TextDisabled("2D: one session per video, named after the video.");
+            } else {
+                if (state.tailcycle_session_id[0] == '\0')
+                    snprintf(state.tailcycle_session_id,
+                             sizeof(state.tailcycle_session_id), "%s",
+                             pm.project_name.c_str());
+                ImGui::InputText("Session ID", state.tailcycle_session_id,
+                                 sizeof(state.tailcycle_session_id));
+                ImGui::SetItemTooltip(
+                    "Becomes the folder name, which IS the session id. Shared by "
+                    "every row below -- the split directory keeps them apart.");
+            }
 
             ImGui::SeparatorText("Splits");
             ImGui::TextDisabled("One session per row. End at 0 means to the end of the recording (%d frames).",
@@ -156,6 +162,17 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
             ImGui::TextDisabled(
                 "Frames are extracted into each group, so the dataset is "
                 "self-contained.");
+            ImGui::Checkbox("Only frames around labels", &state.tailcycle_around_labels);
+            ImGui::SetItemTooltip(
+                "Export a clip of consecutive frames centred on each labelled frame "
+                "instead of the whole range; overlapping clips merge into one group.");
+            if (state.tailcycle_around_labels) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(160);
+                ImGui::SliderInt("Clip frames", &state.tailcycle_window, 1, 256);
+                state.tailcycle_window = std::max(1, state.tailcycle_window);
+            }
+            const int tc_window = state.tailcycle_around_labels ? state.tailcycle_window : 0;
             static const char *kSplits[] = {"train", "val", "test"};
             int remove_at = -1;
             for (size_t i = 0; i < state.tailcycle_ranges.size(); i++) {
@@ -182,7 +199,9 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                     const int last = (r.end > 0 && r.end < tc_total) ? r.end
                                      : (tc_total > 0 ? tc_total - 1 : r.start);
                     const int n = last >= r.start ? last - r.start + 1 : 0;
-                    const long long imgs = (long long)n * (long long)pm.camera_names.size();
+                    const long long imgs = ExportFormats::tailcycle_image_estimate(
+                        amap, (int)pm.camera_names.size(), state.tailcycle_layers, r.start, last,
+                        tc_window);
                     ImGui::SameLine();
                     if (r.end == 0 && tc_total > 0)
                         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.3f, 1.0f),
@@ -226,8 +245,7 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                                             "3D only"};
             ImGui::Combo("Labels", &state.tailcycle_layers, kLayers, 3);
             ImGui::SetItemTooltip(
-                "2D keypoints: per-camera labels plus the calibration, and a "
-                "consumer triangulates for itself.\n"
+                "2D keypoints: one session per video, named after the video.\n"
                 "2D + 3D: also ships red's triangulated solve, for a consumer that "
                 "wants these exact numbers rather than its own.\n"
                 "3D only: the honest choice when the 2D are themselves "
@@ -285,7 +303,7 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
 
         int kp_count = 0;
         for (const auto &[f, fis] : amap)
-            if (any_instance_has_keypoints(fis)) ++kp_count;
+            if (any_instance_has_labels(fis)) ++kp_count;
         ImGui::Text("Annotated:    %d frames", kp_count);
 
         ImGui::SeparatorText("Output");
@@ -396,9 +414,11 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                             const int last = (r.end > 0 && r.end < tc_total)
                                                  ? r.end
                                                  : (tc_total > 0 ? tc_total - 1 : r.start);
-                            if (last >= r.start) tc_frames += last - r.start + 1;
+                            tc_frames += (int)ExportFormats::tailcycle_image_estimate(
+                                amap, (int)pm.camera_names.size(), state.tailcycle_layers, r.start,
+                                last, state.tailcycle_around_labels ? state.tailcycle_window : 0);
                         }
-                        state.images_total = tc_frames * (int)pm.camera_names.size();
+                        state.images_total = tc_frames;
                     } else {
                         state.images_total = kp_count * (int)pm.camera_names.size();
                     }
@@ -441,6 +461,8 @@ inline void DrawExportWindow(ExportWindowState &state, AppContext &ctx,
                     if (dispatch_fmt == ExportFormats::TAILCYCLE) {
                         ecfg.tailcycle_session_id = state.tailcycle_session_id;
                         ecfg.tailcycle_layers = state.tailcycle_layers;
+                        ecfg.tailcycle_window =
+                            state.tailcycle_around_labels ? state.tailcycle_window : 0;
                         // n_frames must describe the media, not the labels: every
                         // frame index in the tables is validated against it, and
                         // the annotation range is usually a sparse subset.

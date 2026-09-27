@@ -29,7 +29,7 @@ inline void DrawMainMenuBar(AppContext &ctx, WindowStates &win) {
             config.path = pm.media_folder;
             config.flags = ImGuiFileDialogFlags_Modal;
             ImGuiFileDialog::Instance()->OpenDialog(
-                "ChooseMedia", "Choose Media", ".mp4", config);
+                "ChooseMedia", "Choose Media", ".avi,.AVI,.mp4,.MP4", config);
         }
         if (ImGui::MenuItem("Open Images")) {
             IGFD::FileDialogConfig config;

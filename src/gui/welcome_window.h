@@ -66,7 +66,7 @@ inline void DrawWelcomeWindow(AppContext &ctx, WindowStates &win) {
             cfg.flags = ImGuiFileDialogFlags_Modal;
             ImGuiFileDialog::Instance()->OpenDialog(
                 "ChooseMedia", "Select Video(s)",
-                ".mp4", cfg);
+                ".avi,.AVI,.mp4,.MP4", cfg);
         }
         ImGui::SameLine(0, spacing);
         if (ImGui::Button("Load Project", ImVec2(btn_w, 30))) {

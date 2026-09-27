@@ -24,6 +24,7 @@
 #include <map>
 #include <numeric>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -106,6 +107,11 @@ struct ExportConfig {
     // range: the format validates every frame index against n_frames.
     std::string tailcycle_split = "train";      // train | val | test
     std::string tailcycle_session_id;
+    // Provenance override for groups.pq `source_video`. Empty = the media
+    // folder's stem, which is right for a single-recording session. Per-video
+    // sessions set it to their own filename so the group id and provenance
+    // name the recording, not the project folder.
+    std::string tailcycle_source_video;
     int tailcycle_n_frames = 0;                 // frames in the MEDIA
     float tailcycle_fps = 0.0f;
     int tailcycle_frame_start = 0;              // inclusive
@@ -953,6 +959,98 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
                       "found at configure time).";
         return false;
     }
+    // A 2D Tailcycle session describes exactly one camera. When red's project
+    // has several independent video files, export one child session per file
+    // while retaining the shared dataset root and split directory.
+    if (cfg.tailcycle_layers == 0 && cfg.camera_names.size() > 1) {
+        struct VideoSession {
+            size_t camera_index;
+            std::string path;
+            std::string session_id;
+            int frames;
+            int width;
+            int height;
+            float fps;
+        };
+        std::vector<VideoSession> videos;
+        std::set<std::string> ids;
+        for (size_t i = 0; i < cfg.camera_names.size(); ++i) {
+            const std::string path = camera_video_path(cfg.media_folder, cfg.camera_names[i]);
+            if (path.empty() || !fs::exists(path)) {
+                if (status) *status = "Error: no video for camera " + cfg.camera_names[i];
+                return false;
+            }
+            ffmpeg_reader::FrameReader reader;
+            if (!reader.open(path)) {
+                if (status) *status = "Error: cannot open " + path + " to inspect video.";
+                return false;
+            }
+            std::string id = fs::path(path).stem().string();
+            for (char &c : id)
+                if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+                    c == '\"' || c == '<' || c == '>' || c == '|') c = '_';
+            if (id.empty() || !ids.insert(id).second) {
+                if (status) *status = "Error: video stems must produce unique session IDs (collision: " + id + ").";
+                return false;
+            }
+            const int frames = reader.frameCount();
+            if (frames <= 0 || reader.width() <= 0 || reader.height() <= 0) {
+                if (status) *status = "Error: cannot determine frame count or dimensions for " + path;
+                return false;
+            }
+            if (std::max(0, cfg.tailcycle_frame_start) >= frames) {
+                if (status) *status = "Error: frame range starts beyond the end of " + path;
+                return false;
+            }
+            videos.push_back({i, path, id, frames, reader.width(), reader.height(),
+                              (float)reader.fps()});
+        }
+
+        for (const VideoSession &video : videos) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) {
+                if (status) *status = "Export cancelled.";
+                return false;
+            }
+            ExportConfig one = cfg;
+            one.camera_names = {cfg.camera_names[video.camera_index]};
+            one.camera_params = {video.camera_index < cfg.camera_params.size()
+                                     ? cfg.camera_params[video.camera_index]
+                                     : CameraParams{}};
+            one.image_width = {video.width};
+            one.image_height = {video.height};
+            one.tailcycle_session_id = video.session_id;
+            one.tailcycle_n_frames = video.frames;
+            one.tailcycle_fps = video.fps;
+            one.tailcycle_source_video = fs::path(video.path).filename().string();
+            // A video may be shorter than the first camera; clip an explicit
+            // range to its own media rather than emitting out-of-range labels.
+            one.tailcycle_frame_start = std::max(0, cfg.tailcycle_frame_start);
+            one.tailcycle_frame_end = cfg.tailcycle_frame_end > 0
+                                          ? std::min(cfg.tailcycle_frame_end, video.frames - 1)
+                                          : 0;
+
+            AnnotationMap one_camera;
+            for (const auto &entry : amap) {
+                FrameInstances instances;
+                instances.reserve(entry.second.size());
+                for (const FrameAnnotation &source : entry.second) {
+                    FrameAnnotation fa = source;
+                    fa.cameras.clear();
+                    if (video.camera_index < source.cameras.size())
+                        fa.cameras.push_back(source.cameras[video.camera_index]);
+                    else
+                        fa.cameras.resize(1);
+                    instances.push_back(std::move(fa));
+                }
+                if (!instances.empty()) one_camera.emplace(entry.first, std::move(instances));
+            }
+            if (!export_tailcycle(one, one_camera, status, img_counter, cancel)) return false;
+        }
+        if (status) *status = "Wrote " + std::to_string(videos.size()) +
+                              " 2D sessions under " + cfg.output_folder + "/" + cfg.tailcycle_split;
+        return true;
+    }
+
     if (cfg.tailcycle_n_frames <= 0) {
         if (status) *status = "Error: no media loaded, so the group length is unknown.";
         return false;
@@ -992,22 +1090,33 @@ inline bool export_tailcycle(const ExportConfig &cfg, const AnnotationMap &amap,
     // filename() returns empty when the path ends in a separator, which would
     // leave the group id as a bare "_ix<start>".
     std::string stem;
-    if (!cfg.media_folder.empty()) {
+    if (!cfg.tailcycle_source_video.empty()) {
+        tc.source_video = cfg.tailcycle_source_video;
+        stem = fs::path(cfg.tailcycle_source_video).stem().string();
+    } else if (!cfg.media_folder.empty()) {
         fs::path mp(cfg.media_folder);
         if (mp.filename().empty()) mp = mp.parent_path();
         stem = mp.filename().string();
+        tc.source_video = stem;
+    } else {
+        tc.source_video = tc.session_id;
     }
     if (stem.empty()) stem = tc.session_id;
-    tc.source_video = stem;
     // Encodes the offset the way johnson-mouse-tracked does: <recording>_ix<start>.
     // Two ranges of one recording then have distinct group ids.
     tc.group_id = stem + "_ix" + std::to_string(start);
 
     for (size_t i = 0; i < tc.calibration.size(); i++) {
-        if (i < cfg.image_width.size() && cfg.image_width[i] > 0)
-            tc.calibration[i].image_width = cfg.image_width[i];
-        if (i < cfg.image_height.size() && cfg.image_height[i] > 0)
-            tc.calibration[i].image_height = cfg.image_height[i];
+        const std::string vpath = camera_video_path(cfg.media_folder, cfg.camera_names[i]);
+        ffmpeg_reader::FrameReader probe;
+        if (vpath.empty() || !probe.open(vpath)) {
+            if (status) *status = "Error: cannot open video for camera " + cfg.camera_names[i];
+            return false;
+        }
+        // The Tailcycle `size` is the on-disk media size. Prefer probing the
+        // actual video over cached project/calibration dimensions.
+        tc.calibration[i].image_width = probe.width();
+        tc.calibration[i].image_height = probe.height();
     }
     // A consumer reads group frame f as the f-th frame of the media in the
     // group folder -- source_frame_start is provenance, not an indexing

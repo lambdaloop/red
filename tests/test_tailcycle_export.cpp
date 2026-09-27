@@ -581,6 +581,39 @@ int main(int argc, char **argv) {
               "red's absolute frame_number becomes a 0-based index into the group");
     }
 
+    // ── 4b. single-camera 2D uses only the required calibration metadata ──
+    {
+        const std::string out = root + "/t4b";
+        auto cfg = make_config(out);
+        cfg.camera_names = {"camA"};
+        cfg.calibration.resize(1);
+        cfg.layers = TailcycleExport::ExportConfig::Layers::TwoD;
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, make_annotations(), &st, &status),
+              "minimal 2D export succeeds without measured calibration: " + status);
+        const fs::path d = fs::path(out) / "train" / "sess1_annotated";
+        const std::string calib = slurp(d / "calibration.toml");
+        CHECK(calib.find("name = \"camA\"") != std::string::npos &&
+              calib.find("size = [ 1280, 960,") != std::string::npos &&
+              calib.find("offset = [ 0.0, 0.0,") != std::string::npos,
+              "2D calibration retains the required name, size, and zero offset");
+        CHECK(calib.find("matrix =") == std::string::npos &&
+              calib.find("rotation =") == std::string::npos &&
+              calib.find("translation =") == std::string::npos,
+              "2D calibration does not invent camera geometry");
+        TailcycleImport::Session imported;
+        TailcycleImport::ImportStats ist;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &imported, &ist, &status),
+              "minimal 2D session imports: " + status);
+        CHECK(imported.mode == "2d" && imported.camera_names == std::vector<std::string>{"camA"},
+              "2D camera identity survives round-trip");
+        CHECK(imported.calibration.size() == 1 && imported.calibration[0].image_width == 1280 &&
+              imported.calibration[0].image_height == 960 &&
+              std::abs(imported.calibration[0].k(0, 0) - 1280.0) < 1e-9,
+              "image size and nominal pinhole survive round-trip");
+    }
+
     // ── 5. refusals: a file that loads cleanly and is wrong is worse than none ──
     {
         auto cfg = make_config(root + "/t5");

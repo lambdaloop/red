@@ -361,9 +361,22 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
             const auto r = toml_numbers(sec, "rotation");
             const auto t = toml_numbers(sec, "translation");
             const auto size = toml_numbers(sec, "size");
-            if (K.size() >= 9)
+            if (K.size() >= 9) {
                 for (int a = 0; a < 3; a++)
                     for (int b = 0; b < 3; b++) c.k(a, b) = K[a * 3 + b];
+            } else if (out->mode == "2d") {
+                // The Tailcycle spec permits geometry-free 2D cameras. Use
+                // its nominal pinhole so red's generic camera math remains
+                // defined without pretending these are measured intrinsics.
+                if (size.size() < 2 || size[0] <= 0 || size[1] <= 0)
+                    return fail("2D camera " + name + " has no valid size.");
+                const double focal = std::max(size[0], size[1]);
+                c.k << focal, 0.0, size[0] / 2.0,
+                       0.0, focal, size[1] / 2.0,
+                       0.0, 0.0, 1.0;
+            } else {
+                return fail("3D camera " + name + " has no complete matrix.");
+            }
             for (size_t j = 0; j < d.size() && j < 5; j++) c.dist_coeffs(j) = d[j];
             if (r.size() >= 3) {
                 c.rvec = Eigen::Vector3d(r[0], r[1], r[2]);
@@ -391,6 +404,8 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
     if (out->camera_names.empty()) return fail("calibration.toml declares no cameras.");
     if (out->mode == "3d" && out->camera_names.size() < 2)
         return fail("mode is \"3d\" but only one camera is declared (rule 5).");
+    if (out->mode == "2d" && out->camera_names.size() != 1)
+        return fail("mode is \"2d\" but does not declare exactly one camera (rule 5).");
 
     // ── groups.pq ──
     auto gt = read_pq(D / "groups.pq");

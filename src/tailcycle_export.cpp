@@ -114,11 +114,17 @@ bool write_calibration_toml(const fs::path &dir, const ExportConfig &cfg, std::s
     std::ofstream o(dir / "calibration.toml");
     if (!o) { *err = "cannot write calibration.toml"; return false; }
     o.precision(17);
+    const bool minimal_2d = cfg.camera_names.size() == 1 &&
+                            cfg.layers == ExportConfig::Layers::TwoD;
     for (size_t i = 0; i < cfg.camera_names.size(); i++) {
         const CameraParams &c = cfg.calibration[i];
         o << "[cam_" << i << "]\n";
         o << "name = " << toml_str(cfg.camera_names[i]) << "\n";
         o << "size = [ " << c.image_width << ", " << c.image_height << ",]\n";
+        if (minimal_2d) {
+            o << "offset = [ 0.0, 0.0,]\n\n";
+            continue;
+        }
         o << "matrix = [";
         for (int r = 0; r < 3; r++) {
             o << " [ ";
@@ -160,9 +166,14 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     if (cfg.node_names.empty()) return fail("Skeleton has no keypoint names.");
     if (cfg.n_frames <= 0) return fail("n_frames must come from the media and be > 0.");
 
+    const bool minimal_2d = cfg.camera_names.size() == 1 &&
+                            cfg.layers == ExportConfig::Layers::TwoD;
     for (size_t i = 0; i < cfg.calibration.size(); i++) {
         const CameraParams &c = cfg.calibration[i];
         const std::string &n = cfg.camera_names[i];
+        if (c.image_width <= 0 || c.image_height <= 0)
+            return fail("Camera " + n + " has no image size; validation rule 8 requires it.");
+        if (minimal_2d) continue; // Tailcycle permits a name/size/offset-only camera.
         if (c.telecentric)
             return fail("Camera " + n + " is telecentric. calibration.toml is an aniposelib "
                         "CameraGroup, which has no telecentric model -- the file would load "
@@ -170,8 +181,6 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         if (!rotation_is_proper(c.r))
             return fail("Camera " + n + " has an improper rotation (det != 1), which has no "
                         "Rodrigues representation.");
-        if (c.image_width <= 0 || c.image_height <= 0)
-            return fail("Camera " + n + " has no image size; validation rule 8 requires it.");
     }
 
     const std::string gid = cfg.group_id.empty() ? cfg.session_id : cfg.group_id;

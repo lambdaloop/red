@@ -12,13 +12,17 @@
 #include "tailcycle_export.h"
 #include "tailcycle_import.h"
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <string>
 
 #if defined(RED_HAVE_PARQUET)
+#include "tailcycle_schema.h"
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/reader.h>
@@ -104,6 +108,105 @@ static bool replace_once(std::string &text, const std::string &from,
     if (p == std::string::npos) return false;
     text.replace(p, from.size(), to);
     return true;
+}
+
+
+// ── hand-written tables, for rows red never writes itself ───────────────────
+
+static const float NA = std::numeric_limits<float>::quiet_NaN();
+
+struct KRow { std::string g; int f; std::string a, c, b, s; float x, y; };
+struct PRow { std::string g; int f; std::string a, b, s; float x, y, z; };
+struct IRow { std::string g; int f; std::string a, c, s; float x0, y0, x1, y1; };
+
+static void put(arrow::FloatBuilder &b, float v) {
+    if (std::isnan(v)) (void)b.AppendNull(); else (void)b.Append(v);
+}
+static void write_keypoints(const fs::path &p, const std::vector<KRow> &rows) {
+    arrow::StringDictionary32Builder g, a, c, b, s;
+    arrow::Int32Builder f;
+    arrow::FloatBuilder x, y;
+    for (const auto &r : rows) {
+        (void)g.Append(r.g); (void)f.Append(r.f); (void)a.Append(r.a); (void)c.Append(r.c);
+        (void)b.Append(r.b); (void)s.Append(r.s); put(x, r.x); put(y, r.y);
+    }
+    std::vector<std::shared_ptr<arrow::Array>> v(8);
+    (void)g.Finish(&v[0]); (void)f.Finish(&v[1]); (void)a.Finish(&v[2]); (void)c.Finish(&v[3]);
+    (void)b.Finish(&v[4]); (void)s.Finish(&v[5]); (void)x.Finish(&v[6]); (void)y.Finish(&v[7]);
+    (void)Tailcycle::write_table(arrow::Table::Make(Tailcycle::keypoints_schema(false), v), p.string());
+}
+static void write_points3d(const fs::path &p, const std::vector<PRow> &rows) {
+    arrow::StringDictionary32Builder g, a, b, s;
+    arrow::Int32Builder f;
+    arrow::FloatBuilder x, y, z;
+    for (const auto &r : rows) {
+        (void)g.Append(r.g); (void)f.Append(r.f); (void)a.Append(r.a); (void)b.Append(r.b);
+        (void)s.Append(r.s); put(x, r.x); put(y, r.y); put(z, r.z);
+    }
+    std::vector<std::shared_ptr<arrow::Array>> v(8);
+    (void)g.Finish(&v[0]); (void)f.Finish(&v[1]); (void)a.Finish(&v[2]); (void)b.Finish(&v[3]);
+    (void)s.Finish(&v[4]); (void)x.Finish(&v[5]); (void)y.Finish(&v[6]); (void)z.Finish(&v[7]);
+    (void)Tailcycle::write_table(arrow::Table::Make(Tailcycle::points3d_schema(false), v), p.string());
+}
+static void write_instances(const fs::path &p, const std::vector<IRow> &rows) {
+    arrow::StringDictionary32Builder g, a, c, s;
+    arrow::Int32Builder f;
+    arrow::FloatBuilder x0, y0, x1, y1;
+    arrow::StringBuilder n;
+    for (const auto &r : rows) {
+        (void)g.Append(r.g); (void)f.Append(r.f); (void)a.Append(r.a); (void)c.Append(r.c);
+        put(x0, r.x0); put(y0, r.y0); put(x1, r.x1); put(y1, r.y1);
+        (void)s.Append(r.s); (void)n.AppendNull();
+    }
+    std::vector<std::shared_ptr<arrow::Array>> v(10);
+    (void)g.Finish(&v[0]); (void)f.Finish(&v[1]); (void)a.Finish(&v[2]); (void)c.Finish(&v[3]);
+    (void)x0.Finish(&v[4]); (void)y0.Finish(&v[5]); (void)x1.Finish(&v[6]); (void)y1.Finish(&v[7]);
+    (void)s.Finish(&v[8]); (void)n.Finish(&v[9]);
+    (void)Tailcycle::write_table(arrow::Table::Make(Tailcycle::instances_schema(), v), p.string());
+}
+
+// Every row of a table as a string, columns in name order, so two tables can
+// be compared as sets whatever their row order or dictionary encoding.
+static std::set<std::string> row_set(const std::shared_ptr<arrow::Table> &t) {
+    std::set<std::string> out;
+    if (!t) return out;
+    auto flat = t->CombineChunks().ValueOrDie();
+    std::vector<std::string> names = flat->ColumnNames();
+    std::sort(names.begin(), names.end());
+    for (int64_t r = 0; r < flat->num_rows(); r++) {
+        std::string row;
+        for (const auto &name : names) {
+            auto arr = flat->GetColumnByName(name)->chunk(0);
+            row += name + "=";
+            if (arr->IsNull(r)) row += "null";
+            else if (auto d = std::dynamic_pointer_cast<arrow::DictionaryArray>(arr))
+                row += std::static_pointer_cast<arrow::StringArray>(d->dictionary())
+                           ->GetString(std::static_pointer_cast<arrow::Int32Array>(d->indices())->Value(r));
+            else if (auto fa = std::dynamic_pointer_cast<arrow::FloatArray>(arr))
+                row += std::to_string(fa->Value(r));
+            else if (auto ia = std::dynamic_pointer_cast<arrow::Int32Array>(arr))
+                row += std::to_string(ia->Value(r));
+            else if (auto sa = std::dynamic_pointer_cast<arrow::StringArray>(arr))
+                row += sa->GetString(r);
+            row += ";";
+        }
+        out.insert(row);
+    }
+    return out;
+}
+static std::set<std::string> row_set(const fs::path &p) { return row_set(read_pq(p)); }
+
+// The rows of `t` whose columns contain every `name=value` in `want`.
+static std::set<std::string> rows_where(const std::set<std::string> &rows,
+                                        std::initializer_list<std::string> want) {
+    std::set<std::string> out;
+    for (const auto &r : rows) {
+        bool all = true;
+        for (const auto &w : want)
+            if (r.find(w + ";") == std::string::npos) all = false;
+        if (all) out.insert(r);
+    }
+    return out;
 }
 
 // ── fixture ──────────────────────────────────────────────────────────────────
@@ -425,6 +528,7 @@ int main(int argc, char **argv) {
         }
 
         cfg.in_place = true;
+        cfg.edited_views = {{0, 0}};   // rewrite the view rather than keep its old rows
         CHECK(TailcycleExport::export_session(cfg, imported.annotations, &st, &status),
               "tracked visible in-place round trip succeeds: " + status);
         auto k = read_pq(d / "keypoints.pq");
@@ -520,6 +624,7 @@ int main(int argc, char **argv) {
         // in the GUI. The save path must not apply source_frame_start twice.
         cfg.source_frame_start = 0;
         cfg.in_place = true;
+        cfg.edited_views = {{0, 0}};
         st = {};
         CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
               "in-place overwrite succeeds: " + status);
@@ -626,7 +731,7 @@ int main(int argc, char **argv) {
               "image size and nominal pinhole survive round-trip");
     }
 
-    // ── 4c. boxes go to instances.pq, keyed so rule 11 holds ──
+    // ── 4c. boxes go to instances.pq, one labeled row each ──
     {
         const std::string out = root + "/t4c";
         auto cfg = make_config(out);
@@ -650,10 +755,10 @@ int main(int argc, char **argv) {
         const fs::path T = fs::path(out) / "train" / "sess1_tracked";
         auto it = read_pq(A / "instances.pq");
         CHECK(it != nullptr, "instances.pq written when boxes exist");
-        // 4 frames x 2 cameras labelled, plus the box-only animal.
-        CHECK(it && it->num_rows() == 9, "one labeled row per keypoint view, plus the box-only one");
+        // Only the two boxes: a keypoint view without a box has no row.
+        CHECK(it && it->num_rows() == 2, "one row per box and none for unboxed views");
         CHECK(it && (dict_values(it, "status") == std::set<std::string>{"labeled"}),
-              "keypoint views and a box-only animal are all labeled");
+              "boxes are labeled");
         bool box_ok = false, present_ok = false;
         for (int64_t r = 0; it && r < it->num_rows(); r++) {
             auto fcol = [&](const char *n) {
@@ -763,6 +868,284 @@ int main(int argc, char **argv) {
               "a group of a multi-group session imports: " + status);
         CHECK(imported.n_frames == 2 && imported.source_frame_start == 103 &&
               imported.annotations.size() == 2, "the chosen group's frames only");
+    }
+
+    // ── 4f. a box whose view's keypoints are tracked goes to _tracked only ──
+    {
+        const std::string out = root + "/t4f";
+        auto cfg = make_config(out);
+        cfg.layers = TailcycleExport::ExportConfig::Layers::TwoDAndThreeD;
+        AnnotationMap amap = make_annotations();
+        // frame 4: predicted 2D, triangulated (annotated) Snout 3D
+        CameraExtras &e = amap.at(4).front().cameras[0].get_extras();
+        e.bbox_x = 1; e.bbox_y = 2; e.bbox_w = 3; e.bbox_h = 4; e.has_bbox = true;
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "split export with a box succeeds: " + status);
+        const fs::path A = fs::path(out) / "train" / "sess1_annotated";
+        const fs::path T = fs::path(out) / "train" / "sess1_tracked";
+        CHECK(!fs::exists(A / "instances.pq"), "the box is not duplicated into _annotated");
+        CHECK(row_set(T / "instances.pq").size() == 1, "the box goes with its view's keypoints");
+    }
+
+    // ── 4g. label comparison, which decides what an in-place save rewrites ──
+    {
+        AnnotationMap amap = make_annotations();
+        const FrameInstances was = amap.at(0);
+        FrameInstances now = was;
+        CHECK(view_labels_equal(&was, &now, 0) && frame_3d_equal(&was, &now), "a copy is equal");
+        now.front().cameras[0].get_extras().has_bbox = true;
+        now.front().cameras[0].get_extras().bbox_w = 5;
+        now.front().cameras[0].get_extras().bbox_h = 5;
+        CHECK(!view_labels_equal(&was, &now, 0), "an added box edits its view");
+        CHECK(view_labels_equal(&was, &now, 1), "... and no other view");
+        CHECK(frame_3d_equal(&was, &now), "... and not the 3D");
+        now = was;
+        now.front().cameras[1].keypoints[0].x += 1;
+        CHECK(!view_labels_equal(&was, &now, 1) && view_labels_equal(&was, &now, 0),
+              "a moved keypoint edits its own view");
+        now.front().cameras[1].keypoints[0].x -= 1;
+        CHECK(view_labels_equal(&was, &now, 1), "an edit that is undone is not an edit");
+        now.front().kp3d[0].x += 1;
+        CHECK(!frame_3d_equal(&was, &now) && view_labels_equal(&was, &now, 0),
+              "a 3D change edits the 3D only");
+        now = was;
+        now.push_back(make_frame(NN, NC, 0, /*instance_id=*/7));
+        CHECK(view_labels_equal(&was, &now, 0) && frame_3d_equal(&was, &now),
+              "an animal with nothing labelled is no animal");
+        CameraExtras &e = now.back().cameras[1].get_extras();
+        e.bbox_w = e.bbox_h = 3; e.has_bbox = true;
+        CHECK(view_labels_equal(&was, &now, 0) && !view_labels_equal(&was, &now, 1),
+              "a new animal edits only the views it is labelled in");
+        FrameInstances empty{make_frame(NN, NC, 0)};
+        CHECK(view_labels_equal(nullptr, &empty, 0) && frame_3d_equal(&empty, nullptr),
+              "an empty frame is the same as no frame");
+    }
+
+    // ── 4h. saving corrections: rewrite what was edited, keep everything else ──
+    // A two-group session with the rows red never writes itself: `unlabeled`
+    // keypoints, a `missing` 3D point, `present` and `absent` instances, and a
+    // null-box `labeled` row as older red exports wrote.
+    {
+        const std::string out = root + "/t4h";
+        auto base = make_config(out);
+        base.force_labels = "annotated";
+        base.layers = TailcycleExport::ExportConfig::Layers::TwoDAndThreeD;
+        base.groups = {{"gA", 2, 0}, {"gB", 2, 2}};
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        const std::vector<KRow> kp0 = {
+            {"gA", 0, "a00", "camA", "Snout", "visible", 10, 20},
+            {"gA", 0, "a00", "camA", "EarL", "unlabeled", NA, NA},
+            {"gA", 0, "a00", "camB", "Snout", "visible", 30, 40},
+            {"gA", 0, "a00", "camB", "EarL", "unlabeled", NA, NA},
+            {"gA", 1, "a00", "camA", "Snout", "visible", 11, 21},
+            {"gB", 0, "a00", "camA", "Snout", "visible", 50, 60},
+        };
+        const std::vector<PRow> p30 = {
+            {"gA", 0, "a00", "Snout", "visible", 1, 2, 3},
+            {"gA", 0, "a00", "EarL", "missing", NA, NA, NA},
+            {"gB", 0, "a00", "Snout", "visible", 4, 5, 6},
+        };
+        const std::vector<IRow> in0 = {
+            {"gA", 0, "a00", "camA", "present", 1, 2, 11, 12},
+            {"gA", 0, "a01", "camA", "absent", NA, NA, NA, NA},
+            {"gA", 0, "a02", "camA", "present", NA, NA, NA, NA},
+            {"gA", 0, "a00", "camB", "present", 5, 5, 15, 15},
+            {"gA", 0, "a01", "camB", "absent", NA, NA, NA, NA},
+            {"gA", 1, "a00", "camA", "labeled", NA, NA, NA, NA},   // invalid (rule 11)
+            {"gA", 1, "a00", "camB", "labeled", 7, 7, 17, 17},
+            {"gB", 0, "a00", "camA", "labeled", 3, 3, 13, 13},
+            {"gB", 0, "a00", "camB", "labeled", NA, NA, NA, NA},   // other group: untouched
+        };
+        // Build the session (its TOMLs and groups.pq) and put the fixture tables in.
+        auto reset = [&]() {
+            fs::remove_all(out);
+            TailcycleExport::ExportStats st;
+            std::string status;
+            if (!TailcycleExport::export_session(base, make_annotations(), &st, &status))
+                std::cout << "  fixture export failed: " << status << "\n";
+            write_keypoints(d / "keypoints.pq", kp0);
+            write_points3d(d / "points3d.pq", p30);
+            write_instances(d / "instances.pq", in0);
+        };
+        reset();
+        const auto K0 = row_set(d / "keypoints.pq");
+        const auto P0 = row_set(d / "points3d.pq");
+        const auto I0 = row_set(d / "instances.pq");
+
+        // What tailcycle_save_session does, for group gA.
+        auto open_gA = [&](TailcycleImport::Session *s) {
+            TailcycleImport::ImportStats ist;
+            std::string status;
+            bool ok = TailcycleImport::read_session(d.string(), "gA", s, &ist, &status);
+            CHECK(ok, "fixture session imports: " + status);
+            return ok;
+        };
+        auto save_gA = [&](const TailcycleImport::Session &s, const AnnotationMap &amap,
+                           std::set<std::pair<int, int>> views, std::set<int> frames3d) {
+            TailcycleExport::ExportConfig cfg = base;
+            cfg.groups.clear();
+            cfg.group_id = s.group_id;
+            cfg.n_frames = s.n_frames;
+            cfg.source_frame_start = 0;
+            cfg.animal_ids = s.animal_ids;
+            cfg.in_place = true;
+            cfg.edited_views = std::move(views);
+            cfg.edited_frames_3d = std::move(frames3d);
+            TailcycleExport::ExportStats st;
+            std::string status;
+            const bool ok = TailcycleExport::export_session(cfg, amap, &st, &status);
+            CHECK(ok, "in-place save succeeds: " + status);
+            return ok;
+        };
+        const std::string legacy = *rows_where(I0, {"frame=1", "camera=camA", "status=labeled"}).begin();
+        auto without = [](std::set<std::string> s, const std::set<std::string> &drop) {
+            for (const auto &r : drop) s.erase(r);
+            return s;
+        };
+
+        // Import: `labeled` and `present` boxes load, `absent` and box-less rows do not.
+        {
+            TailcycleImport::Session s;
+            if (open_gA(&s)) {
+                int boxes = 0;
+                for (const auto &[f, fis] : s.annotations)
+                    for (const auto &fa : fis)
+                        for (const auto &cam : fa.cameras) boxes += cam.has_bbox();
+                CHECK(boxes == 3, "the two present boxes and the labeled one load");
+            }
+        }
+        // An unedited save keeps every row; only the invalid null-box labeled row goes.
+        {
+            TailcycleImport::Session s;
+            if (open_gA(&s) && save_gA(s, s.annotations, {}, {})) {
+                CHECK(row_set(d / "keypoints.pq") == K0, "unedited: keypoints unchanged");
+                CHECK(row_set(d / "points3d.pq") == P0, "unedited: 3D unchanged");
+                CHECK(row_set(d / "instances.pq") == without(I0, {legacy}),
+                      "unedited: instances unchanged but for the null-box labeled row");
+            }
+        }
+        // Moving camA's box at frame 0 rewrites that view alone.
+        reset();
+        {
+            TailcycleImport::Session s;
+            if (open_gA(&s)) {
+                AnnotationMap amap = s.annotations;
+                for (auto &fa : amap.at(0))
+                    if (fa.cameras[0].has_bbox()) fa.cameras[0].extras->bbox_x += 100;
+                if (save_gA(s, amap, {{0, 0}}, {})) {
+                    const auto I = row_set(d / "instances.pq");
+                    const auto view = rows_where(I, {"group_id=gA", "frame=0", "camera=camA"});
+                    CHECK(view.size() == 1, "edited view: exactly red's box");
+                    CHECK(view.size() == 1 &&
+                              view.begin()->find("status=labeled;") != std::string::npos &&
+                              view.begin()->find("x0=101.000000;") != std::string::npos,
+                          "edited view: the present box is labeled, at its new place");
+                    CHECK(rows_where(I, {"frame=0", "camera=camB"}) ==
+                              rows_where(I0, {"frame=0", "camera=camB"}),
+                          "the other camera at that frame is untouched");
+                    CHECK(rows_where(I, {"group_id=gB"}) == rows_where(I0, {"group_id=gB"}),
+                          "the other group is untouched");
+                    CHECK(row_set(d / "keypoints.pq") == K0,
+                          "edited view: keypoints regenerate the same, unlabeled rows kept");
+                    CHECK(row_set(d / "points3d.pq") == P0, "no 3D edit: 3D unchanged");
+                }
+            }
+        }
+        // A 3D edit rewrites that frame's 3D, keeping the `missing` row.
+        reset();
+        {
+            TailcycleImport::Session s;
+            if (open_gA(&s)) {
+                AnnotationMap amap = s.annotations;
+                amap.at(0).front().kp3d[0].x = 9;
+                if (save_gA(s, amap, {}, {0})) {
+                    const auto P = row_set(d / "points3d.pq");
+                    CHECK(P.size() == 3, "3D: one row per point, none lost");
+                    CHECK(rows_where(P, {"group_id=gA", "frame=0", "bodypart=Snout", "x=9.000000"}).size() == 1,
+                          "3D: the edit is written");
+                    CHECK(rows_where(P, {"status=missing"}).size() == 1,
+                          "3D: the missing row red never loads is kept");
+                    // (The edited point now carries a score column -- an imported
+                    // point reads back with confidence 1 -- so compare values.)
+                    CHECK(rows_where(P, {"group_id=gB", "x=4.000000", "y=5.000000", "z=6.000000"}).size() == 1,
+                          "3D: the other group is untouched");
+                    CHECK(row_set(d / "instances.pq") == without(I0, {legacy}),
+                          "3D: instances untouched");
+                }
+            }
+        }
+        // Deleting every box and keypoint of gA empties gA and nothing else.
+        reset();
+        {
+            TailcycleImport::Session s;
+            if (open_gA(&s)) {
+                AnnotationMap amap = s.annotations;
+                for (auto &[f, fis] : amap)
+                    for (auto &fa : fis)
+                        for (auto &cam : fa.cameras) {
+                            if (cam.extras) cam.extras->has_bbox = false;
+                            for (auto &kp : cam.keypoints) kp = Keypoint2D{};
+                        }
+                if (save_gA(s, amap, {{0, 0}, {0, 1}, {1, 0}, {1, 1}}, {})) {
+                    const auto I = row_set(d / "instances.pq");
+                    CHECK(rows_where(I, {"group_id=gA"}).empty(),
+                          "every gA row goes, present and absent included");
+                    CHECK(rows_where(I, {"group_id=gB"}) == rows_where(I0, {"group_id=gB"}),
+                          "gB's instances are untouched");
+                    const auto K = row_set(d / "keypoints.pq");
+                    CHECK(rows_where(K, {"group_id=gA", "status=visible"}).empty(),
+                          "deleted keypoints are gone");
+                    CHECK(rows_where(K, {"status=unlabeled"}).size() == 2 &&
+                              rows_where(K, {"group_id=gB"}).size() == 1,
+                          "unlabeled rows and gB's keypoints are kept");
+                }
+            }
+        }
+        // A box on a new animal gets an id no animal in the session has.
+        reset();
+        {
+            TailcycleImport::Session s;
+            if (open_gA(&s)) {
+                AnnotationMap amap = s.annotations;
+                FrameAnnotation extra = make_frame(NN, NC, 1, (int)s.animal_ids.size());
+                CameraExtras &e = extra.cameras[0].get_extras();
+                e.bbox_x = 50; e.bbox_y = 50; e.bbox_w = 10; e.bbox_h = 10; e.has_bbox = true;
+                amap.at(1).push_back(std::move(extra));
+                if (save_gA(s, amap, {{1, 0}}, {})) {
+                    const auto view = rows_where(row_set(d / "instances.pq"),
+                                                 {"group_id=gA", "frame=1", "camera=camA"});
+                    CHECK(view.size() == 1 && view.begin()->find("animal_id=a03;") != std::string::npos,
+                          "a01 and a02 are taken on disk, so the new animal is a03");
+                }
+            }
+        }
+    }
+
+    // ── 4i. an in-place save that empties a table deletes it ──
+    {
+        const std::string out = root + "/t4i";
+        auto cfg = make_config(out);
+        cfg.camera_names = {"camA"};
+        cfg.calibration.resize(1);
+        cfg.force_labels = "annotated";
+        AnnotationMap amap;
+        FrameAnnotation fa = make_frame(NN, 1, 2);
+        CameraExtras &e = fa.cameras[0].get_extras();
+        e.bbox_x = 1; e.bbox_y = 1; e.bbox_w = 5; e.bbox_h = 5; e.has_bbox = true;
+        amap[2] = FrameInstances{std::move(fa)};
+        TailcycleExport::ExportStats st;
+        std::string status;
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status), "box export: " + status);
+        const fs::path d = fs::path(out) / "train" / "sess1";
+        amap.at(2).front().cameras[0].extras->has_bbox = false;
+        cfg.in_place = true;
+        cfg.edited_views = {{2, 0}};
+        CHECK(TailcycleExport::export_session(cfg, amap, &st, &status),
+              "deleting the last box saves: " + status);
+        CHECK(!fs::exists(d / "instances.pq"), "the emptied instances.pq is deleted");
+        CHECK(!fs::exists(d / "instances.pq.tmp"), "no temporary file is left behind");
     }
 
     // ── 5. refusals: a file that loads cleanly and is wrong is worse than none ──

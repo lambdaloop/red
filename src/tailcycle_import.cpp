@@ -3,6 +3,7 @@
 #include "tailcycle_import.h"
 
 #if defined(RED_HAVE_PARQUET)
+#include "tailcycle_read.h"
 #include "tailcycle_schema.h"
 #include <arrow/api.h>
 #include <arrow/io/file.h>
@@ -40,61 +41,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::shared_ptr<arrow::Table> read_pq(const fs::path &p) {
-    if (!fs::exists(p)) return nullptr;
-    auto file = arrow::io::ReadableFile::Open(p.string());
-    if (!file.ok()) return nullptr;
-    auto reader = parquet::arrow::OpenFile(*file, arrow::default_memory_pool());
-    if (!reader.ok()) return nullptr;
-    auto t = (*reader)->ReadTable();
-    return t.ok() ? *t : nullptr;
-}
-
-// A dictionary<int32,str> column, decoded row by row. Small tables arrive in
-// one chunk; larger ones do not, so chunk offsets are tracked.
-struct DictCol {
-    std::vector<std::string> vals;
-    bool ok = false;
-    explicit DictCol(const std::shared_ptr<arrow::Table> &t, const char *name) {
-        auto col = t->GetColumnByName(name);
-        if (!col) return;
-        for (int c = 0; c < col->num_chunks(); c++) {
-            auto d = std::dynamic_pointer_cast<arrow::DictionaryArray>(col->chunk(c));
-            if (!d) return;
-            auto dv = std::dynamic_pointer_cast<arrow::StringArray>(d->dictionary());
-            auto ix = std::dynamic_pointer_cast<arrow::Int32Array>(d->indices());
-            if (!dv || !ix) return;
-            for (int64_t i = 0; i < ix->length(); i++)
-                vals.push_back(ix->IsNull(i) ? std::string() : dv->GetString(ix->Value(i)));
-        }
-        ok = true;
-    }
-};
-
-struct NumCol {
-    std::vector<double> vals;
-    std::vector<bool> null;
-    bool ok = false;
-    explicit NumCol(const std::shared_ptr<arrow::Table> &t, const char *name) {
-        auto col = t->GetColumnByName(name);
-        if (!col) return;
-        for (int c = 0; c < col->num_chunks(); c++) {
-            auto a = col->chunk(c);
-            for (int64_t i = 0; i < a->length(); i++) {
-                null.push_back(a->IsNull(i));
-                if (a->IsNull(i)) { vals.push_back(0.0); continue; }
-                if (auto f = std::dynamic_pointer_cast<arrow::FloatArray>(a))
-                    vals.push_back(f->Value(i));
-                else if (auto d = std::dynamic_pointer_cast<arrow::DoubleArray>(a))
-                    vals.push_back(d->Value(i));
-                else if (auto n = std::dynamic_pointer_cast<arrow::Int32Array>(a))
-                    vals.push_back(n->Value(i));
-                else return;
-            }
-        }
-        ok = true;
-    }
-};
+using Tailcycle::DictCol;
+using Tailcycle::NumCol;
+using Tailcycle::read_pq;
 
 // Minimal TOML reading: enough for the two files the format defines, which are
 // flat key/value and arrays of numbers or strings. Pulling in a TOML library
@@ -499,7 +448,7 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
             if (s != Tailcycle::status::kVisible &&
                 s != Tailcycle::status::kProjected)
                 return fail("keypoints.pq: unknown status \"" + s + "\".");
-            if (x.null[i] || y.null[i]) continue;
+            if (!Tailcycle::keypoint_row_loaded(s, !x.null[i] && !y.null[i])) continue;
             kp.x = x.vals[i];
             // Mirror of the export: the format stores y from the top of the
             // image, red works in ImPlot coordinates measured from the bottom.
@@ -548,7 +497,8 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
             const int ni = name_index(out->node_names, bp.vals[i]);
             if (ni < 0) return fail("points3d.pq: bodypart \"" + bp.vals[i] +
                                     "\" is not in the session's names (rule 6).");
-            if (x.null[i] || y.null[i] || z.null[i]) continue;
+            if (!Tailcycle::point3d_row_loaded(stt.vals[i], !x.null[i] && !y.null[i] && !z.null[i]))
+                continue;
             Keypoint3D &k3 = frame_of((u32)f, inst).kp3d[ni];
             k3.x = x.vals[i]; k3.y = y.vals[i]; k3.z = z.vals[i];
             // The session's own claim decides. A session declaring
@@ -568,15 +518,30 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
         }
     }
 
-    // ── instances.pq ── boxes only; red has no model for `present`/`absent`.
+    // ── instances.pq ── boxes only; red has no model for `present`/`absent`
+    // without a box, and an in-place save keeps those rows (see
+    // TailcycleExport's in_place). A `present` box loads like a `labeled` one;
+    // a box on an `absent` row is not a positive and is skipped.
     if (auto it = read_pq(D / "instances.pq")) {
         out->has_boxes = true;
-        DictCol cam(it, "camera"), aid(it, "animal_id"), gid(it, "group_id");
+        DictCol cam(it, "camera"), aid(it, "animal_id"), gid(it, "group_id"), stt(it, "status");
         NumCol fr(it, "frame"), x0(it, "x0"), y0(it, "y0"), x1(it, "x1"), y1(it, "y1");
+        bool warned = false;
         for (size_t i = 0; cam.ok && fr.ok && x0.ok && y0.ok && x1.ok && y1.ok &&
                            i < fr.vals.size(); i++) {
             if (gid.ok && gid.vals[i] != out->group_id) continue;
-            if (x0.null[i] || y0.null[i] || x1.null[i] || y1.null[i]) continue;
+            const std::string s = stt.ok ? stt.vals[i] : Tailcycle::status::kLabeled;
+            if (s != Tailcycle::status::kLabeled && s != Tailcycle::status::kPresent &&
+                s != Tailcycle::status::kAbsent) {
+                if (!warned)
+                    st.warnings.push_back("instances.pq: unknown status \"" + s +
+                                          "\"; its boxes skipped.");
+                warned = true;
+                continue;
+            }
+            const bool box = !x0.null[i] && !y0.null[i] && !x1.null[i] && !y1.null[i] &&
+                             Tailcycle::box_nonempty(x0.vals[i], y0.vals[i], x1.vals[i], y1.vals[i]);
+            if (!Tailcycle::instance_box_loaded(s, box)) continue;
             const int f = (int)fr.vals[i], ci = name_index(out->camera_names, cam.vals[i]);
             if (f < 0 || f >= out->n_frames || ci < 0) continue;
             CameraExtras &e = frame_of((u32)f, instance_of(aid.ok ? aid.vals[i] : "a00"))

@@ -8,6 +8,7 @@
 
 #include "types.h"
 #include "json.hpp"
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
@@ -336,6 +337,74 @@ inline const FrameInstances &instances_at(const AnnotationMap &amap, u32 frame) 
     static const FrameInstances empty;
     const auto it = amap.find(frame);
     return it == amap.end() ? empty : it->second;
+}
+
+// ── Label comparison ──
+// Used to tell which parts of a tailcycle session were edited, so saving
+// corrections rewrites only those. Both compare the fields an export writes;
+// UI state is ignored, and an animal with nothing there is the same as no
+// animal. A null FrameInstances is a frame that does not exist.
+
+// Whether camera `cam` holds the same 2D keypoints and boxes, for every animal.
+inline bool view_labels_equal(const FrameInstances *a, const FrameInstances *b, size_t cam) {
+    auto view_of = [cam](const FrameInstances *fis, int id) -> const CameraAnnotation * {
+        const FrameAnnotation *fa = fis ? find_instance(*fis, id) : nullptr;
+        return fa && cam < fa->cameras.size() ? &fa->cameras[cam] : nullptr;
+    };
+    auto same = [](const CameraAnnotation *x, const CameraAnnotation *y) {
+        auto box = [](const CameraAnnotation *c) {
+            return c && c->has_bbox() && c->extras->bbox_w > 0 && c->extras->bbox_h > 0;
+        };
+        if (box(x) != box(y)) return false;
+        if (box(x) && (x->extras->bbox_x != y->extras->bbox_x ||
+                       x->extras->bbox_y != y->extras->bbox_y ||
+                       x->extras->bbox_w != y->extras->bbox_w ||
+                       x->extras->bbox_h != y->extras->bbox_h))
+            return false;
+        const size_t n = std::max(x ? x->keypoints.size() : 0, y ? y->keypoints.size() : 0);
+        for (size_t k = 0; k < n; k++) {
+            const Keypoint2D *p = x && k < x->keypoints.size() ? &x->keypoints[k] : nullptr;
+            const Keypoint2D *q = y && k < y->keypoints.size() ? &y->keypoints[k] : nullptr;
+            const bool pa = p && keypoint2d_assessed(*p), qa = q && keypoint2d_assessed(*q);
+            if (pa != qa) return false;
+            if (pa && (p->has_pos != q->has_pos || p->vis != q->vis || p->author != q->author ||
+                       p->reprojected != q->reprojected || p->x != q->x || p->y != q->y ||
+                       p->confidence != q->confidence))
+                return false;
+        }
+        return true;
+    };
+    for (const FrameInstances *fis : {a, b})
+        if (fis)
+            for (const FrameAnnotation &fa : *fis)
+                if (!same(view_of(a, fa.instance_id), view_of(b, fa.instance_id))) return false;
+    return true;
+}
+
+// Whether every animal has the same 3D points.
+inline bool frame_3d_equal(const FrameInstances *a, const FrameInstances *b) {
+    auto pts = [](const FrameInstances *fis, int id) -> const std::vector<Keypoint3D> * {
+        const FrameAnnotation *fa = fis ? find_instance(*fis, id) : nullptr;
+        return fa ? &fa->kp3d : nullptr;
+    };
+    auto same = [](const std::vector<Keypoint3D> *x, const std::vector<Keypoint3D> *y) {
+        const size_t n = std::max(x ? x->size() : 0, y ? y->size() : 0);
+        for (size_t k = 0; k < n; k++) {
+            const Keypoint3D *p = x && k < x->size() ? &(*x)[k] : nullptr;
+            const Keypoint3D *q = y && k < y->size() ? &(*y)[k] : nullptr;
+            const bool ps = p && p->exist, qs = q && q->exist;
+            if (ps != qs) return false;
+            if (ps && (p->origin != q->origin || p->x != q->x || p->y != q->y ||
+                       p->z != q->z || p->confidence != q->confidence))
+                return false;
+        }
+        return true;
+    };
+    for (const FrameInstances *fis : {a, b})
+        if (fis)
+            for (const FrameAnnotation &fa : *fis)
+                if (!same(pts(a, fa.instance_id), pts(b, fa.instance_id))) return false;
+    return true;
 }
 
 // Get-or-create a FrameAnnotation with default sizes

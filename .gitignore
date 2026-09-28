@@ -39,3 +39,6 @@ ENV/
 # Fly model (generated)
 models/fruitfly/
 .DS_Store
+
+# Planning notes
+plans/

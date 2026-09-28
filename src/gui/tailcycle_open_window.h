@@ -23,6 +23,7 @@
 #include "misc/cpp/imgui_stdlib.h"
 
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,10 @@ struct TailcycleOpenState {
     std::vector<std::string> open_node_names;
     std::vector<std::pair<int,int>> open_edges;
     std::vector<std::string> open_animal_ids;
+    // The labels as opened (or last saved). Saving compares against this to
+    // find what was edited, and rewrites only that -- see
+    // TailcycleExport::ExportConfig::in_place.
+    AnnotationMap open_snapshot;
     bool     confirm_save = false;
     // The counts that used to be crammed into the status line. Kept apart so
     // the line itself stays short enough for a ~280px docked panel.
@@ -214,6 +219,8 @@ inline bool tailcycle_open_session(AppContext &ctx, const std::string &session_d
         remember->open_node_names = s.node_names;
         remember->open_edges = s.edges;
         remember->open_animal_ids = s.animal_ids;
+        // After the reprojection above: display-only 2D is not an edit.
+        remember->open_snapshot = ctx.annotations;
     }
 
     // Short enough to read at a glance in a narrow panel. The counts go to
@@ -227,7 +234,8 @@ inline bool tailcycle_open_session(AppContext &ctx, const std::string &session_d
             std::to_string(s.camera_names.size()) + " cameras, " +
             std::to_string(s.n_frames) + " frames, " +
             std::to_string(st.keypoint_rows) + " 2D and " +
-            std::to_string(st.points3d_rows) + " 3D labels" +
+            std::to_string(st.points3d_rows) + " 3D labels, " +
+            std::to_string(st.instance_rows) + " boxes" +
             (reprojected ? ", " + std::to_string(reprojected) +
                                " 2D reprojected from 3D"
                          : std::string()) +
@@ -285,8 +293,36 @@ inline bool tailcycle_save_session(AppContext &ctx, TailcycleOpenState &st,
                  : st.open_has_3d ? TailcycleExport::ExportConfig::Layers::ThreeD
                                   : TailcycleExport::ExportConfig::Layers::TwoD;
 
+    // What changed since the session was opened: a camera view whose 2D
+    // keypoints or boxes differ, a frame whose 3D differs. Only those are
+    // rewritten; everything else stays as it is on disk.
+    std::set<u32> frames;
+    for (const auto &entry : ctx.annotations) frames.insert(entry.first);
+    for (const auto &entry : st.open_snapshot) frames.insert(entry.first);
+    auto at = [](const AnnotationMap &m, u32 f) -> const FrameInstances * {
+        const auto it = m.find(f);
+        return it == m.end() ? nullptr : &it->second;
+    };
+    for (u32 f : frames) {
+        const FrameInstances *was = at(st.open_snapshot, f), *now = at(ctx.annotations, f);
+        for (size_t c = 0; c < cfg.camera_names.size(); c++)
+            if (!view_labels_equal(was, now, c)) cfg.edited_views.insert({(int)f, (int)c});
+        if (!frame_3d_equal(was, now)) cfg.edited_frames_3d.insert((int)f);
+    }
+    if (cfg.edited_views.empty() && cfg.edited_frames_3d.empty()) {
+        if (status) *status = "No changes to save.";
+        return true;
+    }
+
     TailcycleExport::ExportStats est;
-    return TailcycleExport::export_session(cfg, ctx.annotations, &est, status);
+    if (!TailcycleExport::export_session(cfg, ctx.annotations, &est, status)) return false;
+    st.open_snapshot = ctx.annotations;
+    if (status)
+        *status = "Saved corrections to " + st.open_split + "/" + st.open_session_id + ": " +
+                  std::to_string(cfg.edited_views.size()) + " views and " +
+                  std::to_string(cfg.edited_frames_3d.size()) + " 3D frames edited, " +
+                  std::to_string(est.instance_rows) + " boxes written";
+    return true;
 }
 
 // Opening the folder dialog. There is no browser window in front of it: a
@@ -488,9 +524,7 @@ inline void DrawTailcycleDatasetWindow(TailcycleOpenState &state,
                                    "Overwrite this session's label tables?");
                 if (ImGui::Button("Overwrite")) {
                     state.confirm_save = false;
-                    if (tailcycle_save_session(ctx, state, &state.status))
-                        state.status = "Saved corrections to " + state.open_split +
-                                       "/" + state.open_session_id;
+                    tailcycle_save_session(ctx, state, &state.status);
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Cancel")) state.confirm_save = false;
@@ -501,7 +535,8 @@ inline void DrawTailcycleDatasetWindow(TailcycleOpenState &state,
 
         if (!state.status.empty()) {
             const bool bad = state.status.rfind("Opened", 0) != 0 &&
-                             state.status.rfind("Saved", 0) != 0;
+                             state.status.rfind("Saved", 0) != 0 &&
+                             state.status.rfind("No changes", 0) != 0;
             // Wrapped at the width actually available here, not at
             // TextWrapped's default work rect -- the sessions table above sets
             // a wide content size, and an error message has no length limit

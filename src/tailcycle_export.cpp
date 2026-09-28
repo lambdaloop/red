@@ -4,6 +4,7 @@
 #include "tailcycle_export.h"
 
 #if defined(RED_HAVE_PARQUET)
+#include "tailcycle_read.h"
 #include "tailcycle_schema.h"
 #include "red_math.h"
 #include <arrow/api.h>
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <system_error>
 #include <tuple>
@@ -160,7 +162,15 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     auto t0 = std::chrono::steady_clock::now();
     ExportStats local;
     ExportStats &st = stats ? *stats : local;
-    auto fail = [&](const std::string &m) { if (status) *status = m; return false; };
+    // Label tables are written beside their final name and renamed over it
+    // once a session is complete, so a failure leaves the old tables intact.
+    std::vector<std::pair<fs::path, fs::path>> staged;   // .tmp -> final
+    auto fail = [&](const std::string &m) {
+        std::error_code ec;
+        for (const auto &p : staged) fs::remove(p.first, ec);
+        if (status) *status = m;
+        return false;
+    };
 
     // ── validation that must happen before anything is written ──
     if (cfg.camera_names.empty()) return fail("No cameras.");
@@ -227,13 +237,29 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     // so an id shared between animals is not a cosmetic problem: the rows
     // collide, and a reader keeping the last one per key silently keeps one
     // animal out of five.
+    // A generated id must also miss every id already in use -- the session's
+    // own, and in place every one on disk -- or a new animal is written as an
+    // existing one.
+    std::set<std::string> used_ids;
+    for (const auto &id : cfg.animal_ids)
+        if (!id.empty()) used_ids.insert(id);
+    std::map<int, std::string> made_ids;
     auto animal_id_of = [&](int instance_id) -> std::string {
         if (instance_id >= 0 && instance_id < (int)cfg.animal_ids.size() &&
             !cfg.animal_ids[(size_t)instance_id].empty())
             return cfg.animal_ids[(size_t)instance_id];
+        auto it = made_ids.find(instance_id);
+        if (it != made_ids.end()) return it->second;
         char buf[16];
         snprintf(buf, sizeof(buf), "a%02d", instance_id < 0 ? 0 : instance_id);
-        return buf;
+        std::string id = buf;
+        for (int n = 0; used_ids.count(id); n++) {
+            snprintf(buf, sizeof(buf), "a%02d", n);
+            id = buf;
+        }
+        used_ids.insert(id);
+        made_ids.emplace(instance_id, id);
+        return id;
     };
 
     // Does this animal/view carry anything the chosen layers will write as a
@@ -270,7 +296,9 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             has[(int)bucket_3d(k3.source)] = true;
         }
     }
-    if (!has[0] && !has[1]) return fail("Nothing to export: no labelled points or boxes.");
+    // In place, deleting every label is a correction like any other.
+    if (!has[0] && !has[1] && !cfg.in_place)
+        return fail("Nothing to export: no labelled points or boxes.");
 
     struct Job { Bucket b; const char *labels; std::string suffix; };
     std::vector<Job> jobs;
@@ -293,6 +321,66 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
     const Job *box_owner = &jobs.front();
     for (const Job &j : jobs)
         if (!forced && j.b == Bucket::Annotated) { box_owner = &j; break; }
+    // Every box is written once: with that view's keypoints (annotated if
+    // both sessions have some), else with the animal's 3D, else box_owner.
+    const Job *job_for[2] = {nullptr, nullptr};
+    for (const Job &j : jobs)
+        if (!job_for[(int)j.b]) job_for[(int)j.b] = &j;
+    auto box_job = [&](const FrameAnnotation &fa, size_t ci) -> const Job * {
+        if (forced) return &jobs.front();
+        bool kp[2] = {false, false}, p3[2] = {false, false};
+        if (cfg.layers != ExportConfig::Layers::ThreeD)
+            for (const auto &k : fa.cameras[ci].keypoints)
+                if (k.labeled || k.occluded) kp[(int)bucket_2d(k.source)] = true;
+        if (cfg.layers != ExportConfig::Layers::TwoD)
+            for (const auto &k3 : fa.kp3d)
+                if (k3.source != Kp3DSource::None) p3[(int)bucket_3d(k3.source)] = true;
+        for (const bool *b : {kp, p3})
+            for (int k = 0; k < 2; k++)
+                if (b[k] && job_for[k]) return job_for[k];
+        return box_owner;
+    };
+
+    // ── in place: the tables already on disk, merged below ──
+    std::shared_ptr<arrow::Table> old_kp, old_p3, old_in;
+    if (cfg.in_place) {
+        if (!forced) return fail("An in-place save rewrites one session; it needs force_labels.");
+        const fs::path dir = fs::path(cfg.output_folder) / cfg.split / cfg.session_id;
+        for (auto [t, name] : {std::pair{&old_kp, "keypoints.pq"}, std::pair{&old_p3, "points3d.pq"},
+                               std::pair{&old_in, "instances.pq"}}) {
+            if (!fs::exists(dir / name)) continue;
+            *t = Tailcycle::read_pq(dir / name);
+            if (!*t) return fail(std::string("Cannot read the existing ") + name + ".");
+            Tailcycle::DictCol aid(*t, "animal_id");
+            for (const auto &v : aid.vals) used_ids.insert(v);
+        }
+    }
+    auto written_group = [&](const std::string &id) -> const ExportConfig::Group * {
+        for (const auto &g : groups)
+            if (g.id == id) return &g;
+        return nullptr;
+    };
+    auto camera_index = [&](const std::string &name) {
+        for (size_t i = 0; i < cfg.camera_names.size(); i++)
+            if (cfg.camera_names[i] == name) return (int)i;
+        return -1;
+    };
+    // Whether an old row survives an in-place save. Other groups' rows always
+    // do; a row outside its group's frames never does (rule 6). Otherwise it
+    // does when red did not rewrite its unit (`edited(red_frame)`), or when it
+    // did but the row is one red never loads and red wrote nothing in its key.
+    auto keep_old_row = [&](const std::string &g, double frame, auto &&edited,
+                            bool keep_if_edited) {
+        const ExportConfig::Group *grp = written_group(g);
+        if (!grp) return true;
+        if (frame < 0 || frame >= grp->n_frames) return false;
+        return !edited(grp->source_frame_start + (int)frame) || keep_if_edited;
+    };
+    auto row_key = [](std::initializer_list<std::string> parts) {
+        std::string k;
+        for (const auto &p : parts) { k += p; k += '\x1f'; }
+        return k;
+    };
 
     for (const Job &job : jobs) {
         const std::string sid = cfg.session_id + job.suffix;
@@ -349,11 +437,14 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
             }
         }
 
-        // (red frame, instance_id, camera) with a keypoint row, and (red frame,
-        // instance_id) with a 3D row, in THIS session. instances.pq must give
-        // each keypoint key a `labeled` row (rule 11).
-        std::set<std::tuple<int, int, int>> kp_keys;
-        std::set<std::pair<int, int>> p3_keys;
+        // Keys (rule 9) of the rows red writes, which an old row in an edited
+        // unit must not duplicate. And the files an in-place save empties.
+        std::set<std::string> kp_keys, p3_keys;
+        std::vector<fs::path> emptied;
+        auto stage = [&](const std::shared_ptr<arrow::Table> &t, const char *name) {
+            staged.push_back({dir / (std::string(name) + ".tmp"), dir / name});
+            return Tailcycle::write_table(t, staged.back().first.string());
+        };
 
         // ── keypoints.pq ──
         // Red keeps the user provenance (`Manual`) as `visible`, even when a
@@ -374,6 +465,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 if (!grp) continue;   // rule 6
                 if (cfg.layers == ExportConfig::Layers::ThreeD) break;
                 for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
+                    if (cfg.in_place && !cfg.edited_views.count({(int)fnum, (int)ci})) continue;
                     const auto &cam = fa.cameras[ci];
                     // red stores 2D keypoints in ImPlot coordinates, whose origin
                     // is the BOTTOM-left of the image. Every other exporter flips
@@ -415,9 +507,44 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                         if (scored) any_score = true;
                         if (!(scored ? sc_b.Append(kp.confidence) : sc_b.AppendNull()).ok())
                             return fail("keypoints.pq: score append failed.");
-                        kp_keys.insert({(int)fnum, fa.instance_id, (int)ci});
+                        kp_keys.insert(row_key({grp->id, std::to_string(frame),
+                                                animal_id_of(fa.instance_id),
+                                                cfg.camera_names[ci], cfg.node_names[ni]}));
                         rows++;
                     }
+                }
+            }
+
+            const int red_rows = rows;
+            const bool in_scope = cfg.layers != ExportConfig::Layers::ThreeD;
+            if (cfg.in_place && in_scope && old_kp) {
+                Tailcycle::DictCol g(old_kp, "group_id"), a(old_kp, "animal_id"),
+                    c(old_kp, "camera"), p(old_kp, "bodypart"), s(old_kp, "status");
+                Tailcycle::NumCol f(old_kp, "frame"), x(old_kp, "x"), y(old_kp, "y"),
+                    sc(old_kp, "score");
+                if (!c.ok || !p.ok || !s.ok || !f.ok || !x.ok || !y.ok)
+                    return fail("keypoints.pq: unexpected column types; nothing saved.");
+                for (size_t i = 0; i < f.vals.size(); i++) {
+                    const std::string gi = g.ok ? g.vals[i] : groups.front().id;
+                    const std::string ai = a.ok ? a.vals[i] : std::string("a00");
+                    const int ci = camera_index(c.vals[i]);
+                    const bool has_xy = !x.null[i] && !y.null[i];
+                    auto edited = [&](int rf) { return ci >= 0 && cfg.edited_views.count({rf, ci}); };
+                    if (!keep_old_row(gi, f.vals[i], edited,
+                                      !Tailcycle::keypoint_row_loaded(s.vals[i], has_xy) &&
+                                          !kp_keys.count(row_key({gi, std::to_string((int)f.vals[i]),
+                                                                  ai, c.vals[i], p.vals[i]}))))
+                        continue;
+                    const bool scored = sc.ok && !sc.null[i];
+                    if (scored) any_score = true;
+                    if (!g_b.Append(gi).ok() || !f_b.Append((int)f.vals[i]).ok() ||
+                        !a_b.Append(ai).ok() || !c_b.Append(c.vals[i]).ok() ||
+                        !p_b.Append(p.vals[i]).ok() || !s_b.Append(s.vals[i]).ok() ||
+                        !(x.null[i] ? x_b.AppendNull() : x_b.Append((float)x.vals[i])).ok() ||
+                        !(y.null[i] ? y_b.AppendNull() : y_b.Append((float)y.vals[i])).ok() ||
+                        !(scored ? sc_b.Append((float)sc.vals[i]) : sc_b.AppendNull()).ok())
+                        return fail("keypoints.pq: builder append failed.");
+                    rows++;
                 }
             }
 
@@ -429,11 +556,12 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                     return fail("keypoints.pq: finish failed.");
                 if (any_score && !sc_b.Finish(&a[8]).ok())
                     return fail("keypoints.pq: score finish failed.");
-                auto s = Tailcycle::write_table(
-                    arrow::Table::Make(Tailcycle::keypoints_schema(any_score), a),
-                    (dir / "keypoints.pq").string());
+                auto s = stage(arrow::Table::Make(Tailcycle::keypoints_schema(any_score), a),
+                               "keypoints.pq");
                 if (!s.ok()) return fail("keypoints.pq: " + s.ToString());
-                st.keypoint_rows += rows;
+                st.keypoint_rows += red_rows;
+            } else if (cfg.in_place && in_scope) {
+                emptied.push_back(dir / "keypoints.pq");
             }
         }
 
@@ -450,6 +578,7 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 int frame = 0;
                 const ExportConfig::Group *grp = locate(fnum, &frame);
                 if (!grp) continue;
+                if (cfg.in_place && !cfg.edited_frames_3d.count((int)fnum)) continue;
                 for (size_t ni = 0; ni < fa.kp3d.size() && ni < cfg.node_names.size(); ni++) {
                     const Keypoint3D &k3 = fa.kp3d[ni];
                     if (k3.source == Kp3DSource::None) continue;
@@ -467,7 +596,41 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                     if (scored) any_score = true;
                     if (!(scored ? sc_b.Append(k3.confidence) : sc_b.AppendNull()).ok())
                         return fail("points3d.pq: score append failed.");
-                    p3_keys.insert({(int)fnum, fa.instance_id});
+                    p3_keys.insert(row_key({grp->id, std::to_string(frame),
+                                            animal_id_of(fa.instance_id), cfg.node_names[ni]}));
+                    rows++;
+                }
+            }
+
+            const int red_rows = rows;
+            const bool in_scope = cfg.layers != ExportConfig::Layers::TwoD;
+            if (cfg.in_place && in_scope && old_p3) {
+                Tailcycle::DictCol g(old_p3, "group_id"), a(old_p3, "animal_id"),
+                    p(old_p3, "bodypart"), s(old_p3, "status");
+                Tailcycle::NumCol f(old_p3, "frame"), x(old_p3, "x"), y(old_p3, "y"),
+                    z(old_p3, "z"), sc(old_p3, "score");
+                if (!p.ok || !s.ok || !f.ok || !x.ok || !y.ok || !z.ok)
+                    return fail("points3d.pq: unexpected column types; nothing saved.");
+                for (size_t i = 0; i < f.vals.size(); i++) {
+                    const std::string gi = g.ok ? g.vals[i] : groups.front().id;
+                    const std::string ai = a.ok ? a.vals[i] : std::string("a00");
+                    const bool has_xyz = !x.null[i] && !y.null[i] && !z.null[i];
+                    auto edited = [&](int rf) { return cfg.edited_frames_3d.count(rf) > 0; };
+                    if (!keep_old_row(gi, f.vals[i], edited,
+                                      !Tailcycle::point3d_row_loaded(s.vals[i], has_xyz) &&
+                                          !p3_keys.count(row_key({gi, std::to_string((int)f.vals[i]),
+                                                                  ai, p.vals[i]}))))
+                        continue;
+                    const bool scored = sc.ok && !sc.null[i];
+                    if (scored) any_score = true;
+                    if (!g_b.Append(gi).ok() || !f_b.Append((int)f.vals[i]).ok() ||
+                        !a_b.Append(ai).ok() || !p_b.Append(p.vals[i]).ok() ||
+                        !s_b.Append(s.vals[i]).ok() ||
+                        !(x.null[i] ? x_b.AppendNull() : x_b.Append((float)x.vals[i])).ok() ||
+                        !(y.null[i] ? y_b.AppendNull() : y_b.Append((float)y.vals[i])).ok() ||
+                        !(z.null[i] ? z_b.AppendNull() : z_b.Append((float)z.vals[i])).ok() ||
+                        !(scored ? sc_b.Append((float)sc.vals[i]) : sc_b.AppendNull()).ok())
+                        return fail("points3d.pq: builder append failed.");
                     rows++;
                 }
             }
@@ -480,35 +643,31 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                     return fail("points3d.pq: finish failed.");
                 if (any_score && !sc_b.Finish(&a[8]).ok())
                     return fail("points3d.pq: score finish failed.");
-                auto s = Tailcycle::write_table(
-                    arrow::Table::Make(Tailcycle::points3d_schema(any_score), a),
-                    (dir / "points3d.pq").string());
+                auto s = stage(arrow::Table::Make(Tailcycle::points3d_schema(any_score), a),
+                               "points3d.pq");
                 if (!s.ok()) return fail("points3d.pq: " + s.ToString());
-                st.points3d_rows += rows;
+                st.points3d_rows += red_rows;
+            } else if (cfg.in_place && in_scope) {
+                emptied.push_back(dir / "points3d.pq");
             }
         }
 
         // ── instances.pq (§9) ──
-        // Written only when red has at least one box to say something about;
-        // an absent file is legal and claims nothing. When it is written,
-        // every animal/view with keypoint rows gets a `labeled` row (box or
-        // not) so rule 11 holds. A box-only annotation is also `labeled`: it
-        // is a human-placed box, and `present` would make it an ignore region
-        // a detector never learns from. That departs from rule 11's "a labeled
-        // instance has at least one keypoint row" -- deliberately, so a
-        // detection-only dataset can be expressed. red's bboxes are already
-        // top-left image coordinates, so only origin+extent -> [x0,x1) is
-        // converted.
+        // One `labeled` row per box, and nothing else: a view without a box
+        // has no row. A box-only annotation is also `labeled`: it is a
+        // human-placed box, and `present` would make it an ignore region a
+        // detector never learns from. red's bboxes are already top-left image
+        // coordinates, so only origin+extent -> [x0,x1) is converted.
         //
-        // Skipped in place: red does not model `present`/`absent` rows
-        // without boxes, so rewriting an existing file would drop them.
-        if (!cfg.in_place) {
+        // In place, an edited view's rows become exactly red's boxes (a
+        // `present` box becomes `labeled`, `absent` and box-less rows go); an
+        // unedited view keeps its rows as they are, except `labeled` rows with
+        // no box, which rule 11 forbids.
+        {
             arrow::StringDictionary32Builder g_b, a_b, c_b, s_b;
             arrow::Int32Builder f_b;
             arrow::FloatBuilder x0_b, y0_b, x1_b, y1_b;
             arrow::StringBuilder n_b;
-            std::set<std::tuple<int, int, int>> written;
-            bool any_box = false;
             int rows = 0;
 
             for (const auto &[fnum, fis] : amap)
@@ -518,58 +677,92 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
                 if (!grp) continue;
                 for (size_t ci = 0; ci < fa.cameras.size() && ci < cfg.camera_names.size(); ci++) {
                     const CameraAnnotation &cam = fa.cameras[ci];
-                    const bool box = has_box(cam);
-                    const bool kp = kp_keys.count({(int)fnum, fa.instance_id, (int)ci}) > 0;
-                    const bool p3 = p3_keys.count({(int)fnum, fa.instance_id}) > 0;
-                    if (!kp && !box) continue;
-                    // A box whose keypoints went to the other session stays
-                    // with them; a box-only one goes to box_owner alone.
-                    const bool box_only = box && !view_has_labels(fa, ci);
-                    if (!kp && !p3 && !(box_only && &job == box_owner)) continue;
-                    if (!written.insert({(int)fnum, fa.instance_id, (int)ci}).second) continue;
-                    const char *stt = Tailcycle::status::kLabeled;
+                    if (!has_box(cam)) continue;
+                    if (cfg.in_place && !cfg.edited_views.count({(int)fnum, (int)ci})) continue;
+                    if (box_job(fa, ci) != &job) continue;
+                    const CameraExtras &e = *cam.extras;
                     if (!g_b.Append(grp->id).ok() || !f_b.Append(frame).ok() ||
                         !a_b.Append(animal_id_of(fa.instance_id)).ok() ||
-                        !c_b.Append(cfg.camera_names[ci]).ok() || !s_b.Append(stt).ok() ||
-                        !n_b.AppendNull().ok())
+                        !c_b.Append(cfg.camera_names[ci]).ok() ||
+                        !s_b.Append(Tailcycle::status::kLabeled).ok() ||
+                        !n_b.AppendNull().ok() ||
+                        !x0_b.Append((float)e.bbox_x).ok() ||
+                        !y0_b.Append((float)e.bbox_y).ok() ||
+                        !x1_b.Append((float)(e.bbox_x + e.bbox_w)).ok() ||
+                        !y1_b.Append((float)(e.bbox_y + e.bbox_h)).ok())
                         return fail("instances.pq: builder append failed.");
-                    if (box) {
-                        const CameraExtras &e = *cam.extras;
-                        any_box = true;
-                        if (!x0_b.Append((float)e.bbox_x).ok() ||
-                            !y0_b.Append((float)e.bbox_y).ok() ||
-                            !x1_b.Append((float)(e.bbox_x + e.bbox_w)).ok() ||
-                            !y1_b.Append((float)(e.bbox_y + e.bbox_h)).ok())
-                            return fail("instances.pq: box append failed.");
-                    } else if (!x0_b.AppendNull().ok() || !y0_b.AppendNull().ok() ||
-                               !x1_b.AppendNull().ok() || !y1_b.AppendNull().ok()) {
-                        return fail("instances.pq: box append failed.");
-                    }
                     rows++;
                 }
             }
 
-            if (any_box && rows > 0) {
+            const int red_rows = rows;
+            if (cfg.in_place && old_in) {
+                Tailcycle::DictCol g(old_in, "group_id"), a(old_in, "animal_id"),
+                    c(old_in, "camera"), s(old_in, "status");
+                Tailcycle::NumCol f(old_in, "frame"), x0(old_in, "x0"), y0(old_in, "y0"),
+                    x1(old_in, "x1"), y1(old_in, "y1");
+                Tailcycle::StrCol n(old_in, "notes");
+                if (!c.ok || !f.ok || !x0.ok || !y0.ok || !x1.ok || !y1.ok)
+                    return fail("instances.pq: unexpected column types; nothing saved.");
+                for (size_t i = 0; i < f.vals.size(); i++) {
+                    const std::string gi = g.ok ? g.vals[i] : groups.front().id;
+                    const std::string ai = a.ok ? a.vals[i] : std::string("a00");
+                    const std::string si = s.ok ? s.vals[i] : std::string(Tailcycle::status::kLabeled);
+                    const int ci = camera_index(c.vals[i]);
+                    const bool box = !x0.null[i] && !y0.null[i] && !x1.null[i] && !y1.null[i] &&
+                                     Tailcycle::box_nonempty(x0.vals[i], y0.vals[i],
+                                                             x1.vals[i], y1.vals[i]);
+                    auto edited = [&](int rf) { return ci >= 0 && cfg.edited_views.count({rf, ci}); };
+                    if (!keep_old_row(gi, f.vals[i], edited, false)) continue;
+                    if (written_group(gi) && si == Tailcycle::status::kLabeled && !box) continue;
+                    const bool noted = n.ok && !n.null[i];
+                    if (!g_b.Append(gi).ok() || !f_b.Append((int)f.vals[i]).ok() ||
+                        !a_b.Append(ai).ok() || !c_b.Append(c.vals[i]).ok() ||
+                        !s_b.Append(si).ok() ||
+                        !(noted ? n_b.Append(n.vals[i]) : n_b.AppendNull()).ok() ||
+                        !(x0.null[i] ? x0_b.AppendNull() : x0_b.Append((float)x0.vals[i])).ok() ||
+                        !(y0.null[i] ? y0_b.AppendNull() : y0_b.Append((float)y0.vals[i])).ok() ||
+                        !(x1.null[i] ? x1_b.AppendNull() : x1_b.Append((float)x1.vals[i])).ok() ||
+                        !(y1.null[i] ? y1_b.AppendNull() : y1_b.Append((float)y1.vals[i])).ok())
+                        return fail("instances.pq: builder append failed.");
+                    rows++;
+                }
+            }
+
+            if (rows > 0) {
                 std::vector<std::shared_ptr<arrow::Array>> a(10);
                 if (!g_b.Finish(&a[0]).ok() || !f_b.Finish(&a[1]).ok() || !a_b.Finish(&a[2]).ok() ||
                     !c_b.Finish(&a[3]).ok() || !x0_b.Finish(&a[4]).ok() || !y0_b.Finish(&a[5]).ok() ||
                     !x1_b.Finish(&a[6]).ok() || !y1_b.Finish(&a[7]).ok() || !s_b.Finish(&a[8]).ok() ||
                     !n_b.Finish(&a[9]).ok())
                     return fail("instances.pq: finish failed.");
-                auto s = Tailcycle::write_table(
-                    arrow::Table::Make(Tailcycle::instances_schema(), a),
-                    (dir / "instances.pq").string());
+                auto s = stage(arrow::Table::Make(Tailcycle::instances_schema(), a),
+                               "instances.pq");
                 if (!s.ok()) return fail("instances.pq: " + s.ToString());
-                st.instance_rows += rows;
+                st.instance_rows += red_rows;
+            } else if (cfg.in_place) {
+                emptied.push_back(dir / "instances.pq");
             }
+        }
+
+        // Every table of this session is written; put them in place.
+        {
+            std::error_code ec;
+            for (const auto &[tmp, dst] : staged) {
+                fs::rename(tmp, dst, ec);
+                if (ec) return fail("Cannot replace " + dst.string() + ": " + ec.message());
+            }
+            staged.clear();
+            for (const auto &p : emptied) fs::remove(p, ec);
         }
 
         // §3 asks for keypoints.pq or points3d.pq. red also accepts a session
         // whose only labels are boxes in instances.pq -- a detection-only
         // dataset -- which is a deliberate extension of the format. Reaching
         // here with none of the three means the bucket scan and the row loops
-        // disagreed, which is a bug rather than bad input.
-        if (!fs::exists(dir / "keypoints.pq") && !fs::exists(dir / "points3d.pq") &&
+        // disagreed, which is a bug rather than bad input. In place, emptying
+        // a session is a legitimate correction (rule 6: no table is required).
+        if (!cfg.in_place && !fs::exists(dir / "keypoints.pq") && !fs::exists(dir / "points3d.pq") &&
             !fs::exists(dir / "instances.pq"))
             return fail("Session " + sid + " would have no label table.");
 
@@ -581,9 +774,9 @@ bool export_session(const ExportConfig &cfg, const AnnotationMap &amap,
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (status) {
         char buf[256];
-        snprintf(buf, sizeof(buf), "Wrote %d session%s: %d 2D rows, %d 3D rows (%.1fs)",
+        snprintf(buf, sizeof(buf), "Wrote %d session%s: %d 2D rows, %d 3D rows, %d boxes (%.1fs)",
                  st.sessions_written, st.sessions_written == 1 ? "" : "s",
-                 st.keypoint_rows, st.points3d_rows, st.elapsed_seconds);
+                 st.keypoint_rows, st.points3d_rows, st.instance_rows, st.elapsed_seconds);
         *status = buf;
     }
     return true;

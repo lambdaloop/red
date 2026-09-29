@@ -397,7 +397,7 @@ inline void DrawLabelingToolWindow(
         // that was never labelled has no annotation entry, so it has no tick
         // at all and you are hunting an absence. A button that walks the list
         // is the only thing that reliably reaches it.
-        const int total_frames = dc_context->estimated_num_frames;
+        const int total_frames = dc_context->estimated_num_frames + 1;
         // Are the never-labelled frames the exception, or the norm? On a
         // video where 100 frames of 8000 are labelled they are the norm: an
         // orange tick on each would paint the bar and bury the 100 that
@@ -452,8 +452,7 @@ inline void DrawLabelingToolWindow(
             if (!needs_fix_frames.empty()) overview_lines++;
             // Plot plus up to two wrapped rows of class chips.
             const float timeline_block =
-                (dc_context->estimated_num_frames > 0) ? 78.0f + 2.0f * line_h
-                                                       : 0.0f;
+                (total_frames > 0) ? 78.0f + 2.0f * line_h : 0.0f;
             const float splitter_h = 6.0f;
             const float reserved =
                 overview_lines * line_h + timeline_block + splitter_h +
@@ -673,7 +672,7 @@ inline void DrawLabelingToolWindow(
             const double px_per_frame_full =
                 timeline_w / (double)ImMax(1, total_frames);
             const double x_pad = 6.0 / ImMax(px_per_frame_full, 1e-9);
-            const double x_lo = -x_pad, x_hi = (double)total_frames + x_pad;
+            const double x_lo = -x_pad, x_hi = (double)(total_frames - 1) + x_pad;
 
             if (state.timeline_reset_pending) {
                 ImPlot::SetNextAxesLimits(x_lo, x_hi, 0, 1);

@@ -424,8 +424,8 @@ load_images(std::map<std::string, std::string> &selected_files,
     if (imgs_names.size() < (size_t)label_buffer_size) {
         label_buffer_size = imgs_names.size();
     }
-    // Decoder threads share this context. Set the timeline length before they
-    // start; image_loader used to rewrite it from every camera thread, making
+    // Decoder threads share this context. Set the frame counts before they
+    // start; image_loader used to rewrite them from every camera thread, making
     // the UI oscillate when camera folders had different frame counts.
     dc_context->total_num_frame = (int)imgs_names.size();
     dc_context->estimated_num_frames = (int)imgs_names.size();
@@ -702,13 +702,13 @@ load_videos(std::map<std::string, std::string> &selected_files,
                 (int)(demuxers[0]->GetDuration() * demuxers[0]->GetFramerate());
         else
             dc_context->estimated_num_frames =
-                (int)demuxers[0]->GetNumFrames() - 1;
+                (int)demuxers[0]->GetNumFrames();
     }
     dc_context->sync_fix_active = sync_enable;
     dc_context->sync_canonical_len = splan.canonical_len;
     if (sync_enable) {
         dc_context->total_num_frame = (int)splan.canonical_len;
-        dc_context->estimated_num_frames = (int)splan.canonical_len - 1;
+        dc_context->estimated_num_frames = (int)splan.canonical_len;
         // Canonical slots are uniform in trigger time — pace playback by the
         // trigger interval, not the (nominal) container frame rate.
         dc_context->video_fps = 1e9 / (double)splan.delta_ns;

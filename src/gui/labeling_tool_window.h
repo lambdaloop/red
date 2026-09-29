@@ -434,7 +434,7 @@ inline void DrawLabelingToolWindow(
             const auto *demuxer = ctx.demuxers[timeline_camera];
             total_frames = demuxer->GetNumFrames() == 0
                 ? (int)(demuxer->GetDuration() * demuxer->GetFramerate())
-                : (int)demuxer->GetNumFrames() - 1;
+                : (int)demuxer->GetNumFrames();
         }
         // Are the never-labelled frames the exception, or the norm? On a
         // video where 100 frames of 8000 are labelled they are the norm: an
@@ -711,7 +711,8 @@ inline void DrawLabelingToolWindow(
             const double px_per_frame_full =
                 timeline_w / (double)ImMax(1, total_frames);
             const double x_pad = 6.0 / ImMax(px_per_frame_full, 1e-9);
-            const double x_lo = -x_pad, x_hi = (double)total_frames + x_pad;
+            // total_frames is a count; the last tick sits at total_frames - 1.
+            const double x_lo = -x_pad, x_hi = (double)(total_frames - 1) + x_pad;
 
             if (state.timeline_reset_pending) {
                 ImPlot::SetNextAxesLimits(x_lo, x_hi, 0, 1);

@@ -59,7 +59,7 @@ inline void sync_fix_toggle(AppContext &ctx, bool enable) {
                                      plan.canonical_len - 1);
         dc->sync_canonical_len = plan.canonical_len;
         dc->total_num_frame = (int)plan.canonical_len;
-        dc->estimated_num_frames = (int)plan.canonical_len - 1;
+        dc->estimated_num_frames = (int)plan.canonical_len;
         // Canonical slots are uniform in trigger time — pace playback by the
         // trigger interval.
         dc->video_fps = 1e9 / (double)plan.delta_ns;
@@ -75,7 +75,7 @@ inline void sync_fix_toggle(AppContext &ctx, bool enable) {
             dc->estimated_num_frames =
                 (int)(ctx.demuxers[0]->GetDuration() * dc->video_fps);
         else
-            dc->estimated_num_frames = (int)ctx.demuxers[0]->GetNumFrames() - 1;
+            dc->estimated_num_frames = (int)ctx.demuxers[0]->GetNumFrames();
         dc->total_num_frame = INT_MAX;
     }
 
@@ -178,13 +178,13 @@ inline void DrawTransportBar(TransportBarState &state, AppContext &ctx) {
 
     ImGui::SameLine(0.0f, spacing);
     if (ImGui::Button(ICON_FK_STEP_FORWARD)) {
-        int f = std::min(dc->total_num_frame,
+        int f = std::min(std::max(0, dc->total_num_frame - 1),
                          current_frame_num + dc->seek_interval);
         seek_all_cameras(ctx.scene, f, dc->video_fps, ps, false);
     }
     ImGui::SameLine(0.0f, spacing);
     if (ImGui::Button(ICON_FK_FAST_FORWARD)) {
-        int f = std::min(dc->total_num_frame,
+        int f = std::min(std::max(0, dc->total_num_frame - 1),
                          current_frame_num + 10 * dc->seek_interval);
         seek_all_cameras(ctx.scene, f, dc->video_fps, ps, false);
     }
@@ -209,7 +209,8 @@ inline void DrawTransportBar(TransportBarState &state, AppContext &ctx) {
             // seek_accurate = true forward-decodes from the keyframe to the
             // requested frame (same precise path the Labeling Tool uses),
             // instead of snapping to the previous keyframe like scrubbing.
-            state.edit_buf = std::clamp(state.edit_buf, 0, dc->estimated_num_frames);
+            state.edit_buf = std::clamp(
+                state.edit_buf, 0, std::max(0, dc->estimated_num_frames - 1));
             seek_all_cameras(ctx.scene, state.edit_buf, dc->video_fps, ps, true);
             state.slider_text_editing = false;
             ps.slider_text_editing = false;
@@ -223,7 +224,8 @@ inline void DrawTransportBar(TransportBarState &state, AppContext &ctx) {
         state.edit_buf = ps.slider_frame_number;
         ImGui::SetNextItemWidth(200.0f);
         bool changed = ImGui::SliderInt(
-            "##timeline", &state.edit_buf, 0, dc->estimated_num_frames);
+            "##timeline", &state.edit_buf, 0,
+            std::max(0, dc->estimated_num_frames - 1));
 
         if (ImGui::TempInputIsActive(ImGui::GetItemID())) {
             // Cmd+click detected — pause and switch to InputInt next frame
@@ -257,7 +259,7 @@ inline void DrawTransportBar(TransportBarState &state, AppContext &ctx) {
                 const sync_plan::SyncCam *cam0 =
                     plan.cam(ctx.pm.camera_names[0]);
                 const int64_t range =
-                    std::max<int64_t>(1, dc->estimated_num_frames + 1);
+                    std::max<int64_t>(1, dc->estimated_num_frames);
                 for (const auto &kv : plan.cams) {
                     for (const auto &g : kv.second.gaps) {
                         int64_t pos = fix_on || !cam0 ? g.slot
@@ -290,7 +292,7 @@ inline void DrawTransportBar(TransportBarState &state, AppContext &ctx) {
         // so the clock would read 00:00:07 for frame 7, which looks like a
         // duration and is not one. Count frames instead.
         ImGui::Text("frame %d / %d", (int)state.edit_buf,
-                    (int)dc->estimated_num_frames);
+                    std::max(0, (int)dc->estimated_num_frames - 1));
     } else {
         float current_time_sec = state.edit_buf / dc->video_fps;
         float total_time_sec = dc->estimated_num_frames / dc->video_fps;

@@ -554,8 +554,8 @@ bool read_session(const std::string &session_dir, const std::string &group_id,
         }
     }
 
-    if (!out->has_2d && !out->has_3d && !out->has_boxes)
-        return fail("Session has no keypoints.pq, points3d.pq or instances.pq.");
+    // All annotation tables are optional. A session with none is a valid empty
+    // annotation set (for example, after the user clears every correction).
     st.frames = (int)out->annotations.size();
     if (status) {
         *status = "Read " + out->session_id + "/" + out->group_id + ": " +

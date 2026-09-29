@@ -627,6 +627,23 @@ int main(int argc, char **argv) {
             }
         }
         CHECK(found, "in-place overwrite replaces the existing label table");
+
+        // Clearing all corrections is valid: in-place export removes all three
+        // optional annotation tables, and importing the session still works.
+        AnnotationMap empty;
+        cfg.edited_views.clear();
+        for (int f = 0; f < NF; ++f)
+            for (int c = 0; c < NC; ++c) cfg.edited_views.insert({f, c});
+        for (int f = 0; f < NF; ++f) cfg.edited_frames_3d.insert(f);
+        st = {};
+        CHECK(TailcycleExport::export_session(cfg, empty, &st, &status),
+              "in-place save can clear every annotation: " + status);
+        CHECK(!fs::exists(d / "keypoints.pq") && !fs::exists(d / "points3d.pq") &&
+              !fs::exists(d / "instances.pq"), "empty corrections remove all label tables");
+        TailcycleImport::Session cleared;
+        CHECK(TailcycleImport::read_session(d.string(), "sess1", &cleared, &ist, &status),
+              "empty annotation session imports: " + status);
+        CHECK(cleared.annotations.empty(), "empty session imports with no annotations");
     }
 
     // ── 3d. every animal gets its own animal_id ──

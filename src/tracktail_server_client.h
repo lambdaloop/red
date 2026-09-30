@@ -516,7 +516,8 @@ inline TracktailChunkResult tracktail_server_predict_chunk(
     const std::vector<CameraParams> &cams,
     const std::vector<Eigen::Vector3d> &seed_3d,
     int seed_t = 0,
-    const std::vector<std::string> &cam_names_opt = {}) {
+    const std::vector<std::string> &cam_names_opt = {},
+    int n_frames = 0) {  // frames to send; 0 = the model's full chunk
     using namespace tracktail_detail;
     using namespace tracktail_server_detail;
 
@@ -527,7 +528,7 @@ inline TracktailChunkResult tracktail_server_predict_chunk(
         r.error = "No cameras or queries";
         return r;
     }
-    const int T = s.n_frames, S = s.image_size;
+    const int T = n_frames > 0 ? n_frames : s.n_frames, S = s.image_size;
     if (T < 2 || S <= 0) {
         r.error = "Server not probed (no n_frames / image_size)";
         return r;

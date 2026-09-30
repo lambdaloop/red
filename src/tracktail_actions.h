@@ -231,7 +231,15 @@ inline void tracktail_handle_requests(TracktailWindowState &st,
             return;
         }
     }
-    const int T = rt.server.n_frames;
+    // t=0 is the seed; write t=1..n_keep. A chunk holds n_frames-1 future
+    // frames.
+    const int n_keep = std::clamp(st.server_n_keep, 1, rt.server.n_frames - 1);
+    if (n_keep < st.server_n_keep)
+        printf("[tracktail/server] Model predicts %d frames ahead; keeping %d "
+               "of the %d asked for\n", rt.server.n_frames - 1, n_keep,
+               st.server_n_keep);
+    // Send only the frames needed (seed + n_keep), rounded up to an even count.
+    const int T = std::min(rt.server.n_frames, (n_keep + 2) / 2 * 2);
 
     std::deque<std::vector<uint8_t>> scratch;
     std::vector<const uint8_t *> frames((size_t)num_cams * T, nullptr);
@@ -251,7 +259,7 @@ inline void tracktail_handle_requests(TracktailWindowState &st,
     auto t_start = std::chrono::steady_clock::now();
     TracktailChunkResult chunk = tracktail_server_predict_chunk(
         rt.server, frames, widths, heights, pm.camera_params, seed,
-        /*seed_t=*/0, cam_names);
+        /*seed_t=*/0, cam_names, T);
     float ms = std::chrono::duration<float, std::milli>(
                    std::chrono::steady_clock::now() - t_start).count();
     st.server_last_total_ms = rt.server.last_total_ms;
@@ -267,11 +275,6 @@ inline void tracktail_handle_requests(TracktailWindowState &st,
         printf("[tracktail/server] FAILED: %s\n", chunk.error.c_str());
         return;
     }
-    // t=0 is the seed; write t=1..n_keep. A chunk holds T-1 future frames.
-    const int n_keep = std::clamp(st.server_n_keep, 1, T - 1);
-    if (n_keep < st.server_n_keep)
-        printf("[tracktail/server] Model predicts %d frames ahead; keeping %d "
-               "of the %d asked for\n", T - 1, n_keep, st.server_n_keep);
     for (int t = 1; t <= n_keep && t < (int)chunk.kp3d.size(); ++t) {
         FrameAnnotation &fa = future_frame(t);
         for (int q = 0; q < (int)seed_node_idx.size() &&

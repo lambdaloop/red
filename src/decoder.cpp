@@ -1035,7 +1035,7 @@ static inline bool load_image_rgba(const std::string &file_name,
             }
         }
     }
-    // Fallback to stbi for non-JPEG formats (PNG, TIFF, etc.)
+    // Fallback to stbi for non-JPEG formats (PNG, BMP; stb_image has no TIFF)
     int w, h, ch;
     unsigned char *data = stbi_load(file_name.c_str(), &w, &h, &ch, 4);
     if (!data) return false;

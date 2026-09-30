@@ -210,7 +210,7 @@ inline void DrawAnnotationDialog(AnnotationDialogState &state,
             if (state.discovered_cameras.empty()) {
                 ImGui::TextDisabled("(none found)");
                 ImGui::TextWrapped(
-                    "Videos: .mp4 files directly in the folder, one per "
+                    "Videos: .mp4 or .avi files directly in the folder, one per "
                     "camera.\n"
                     "Images: one directory per camera holding that camera's "
                     "frames, or <camera>_<frame>.jpg files in the folder "

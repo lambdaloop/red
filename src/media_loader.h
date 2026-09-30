@@ -62,13 +62,6 @@ inline MediaKind media_kind_from_str(const std::string &s) {
     return MediaKind::Video;
 }
 
-inline bool is_image_ext(const std::string &ext) {
-    std::string e;
-    for (char c : ext) e += (char)std::tolower((unsigned char)c);
-    return e == ".jpg" || e == ".jpeg" || e == ".png" || e == ".tif" ||
-           e == ".tiff" || e == ".bmp";
-}
-
 // The flat counterpart of scan_per_camera_dirs: <root>/<cam>_<name>.<ext>,
 // which is the shape File > Open Images produces.
 inline bool scan_flat_images(const std::string &root,
@@ -606,9 +599,9 @@ load_videos(std::map<std::string, std::string> &selected_files,
         pm.camera_names = loaded_cam_names;
     } else {
         for (const auto &elem : selected_files) {
-            std::size_t cam_string_mp4_position = elem.first.find("mp4");
+            // "Cam1.avi" / "Cam1.MP4" -> "Cam1".
             std::string cam_string =
-                elem.first.substr(0, cam_string_mp4_position - 1);
+                std::filesystem::path(elem.first).stem().string();
             std::map<std::string, std::string> m;
             try {
                 FFmpegDemuxer *demuxer =

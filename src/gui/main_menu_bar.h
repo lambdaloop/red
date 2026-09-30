@@ -41,8 +41,7 @@ inline void DrawMainMenuBar(AppContext &ctx, WindowStates &win) {
             config.path = pm.media_folder;
             config.flags = ImGuiFileDialogFlags_Modal;
             ImGuiFileDialog::Instance()->OpenDialog(
-                "ChooseImages", "Choose Images",
-                ".jpg,.tiff,.jpeg,.png", config);
+                "ChooseImages", "Choose Images", image_ext_filter(), config);
         }
         // Both modes of the one form. The mode is always set explicitly: it
         // used to be left at whatever the last creation put there, so making a

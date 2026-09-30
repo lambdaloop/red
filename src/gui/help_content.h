@@ -203,7 +203,7 @@ inline const std::vector<Workflow> &workflows() {
     static const std::vector<Workflow> w = {
         {"Create an annotation project", {
             "Welcome > Create Annotation Project (or Annotate menu).",
-            "Pick the video folder \xE2\x80\x94 RED auto-discovers one .mp4 per camera.",
+            "Pick the video folder \xE2\x80\x94 RED auto-discovers one .mp4 or .avi per camera.",
             "Set project name, root path, and skeleton (preset or a .json file).",
             "For multi-camera: choose the camera model (Projective or Telecentric) and an existing calibration folder.",
             "Create Project \xE2\x80\x94 videos load, one decoder per camera.",

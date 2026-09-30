@@ -267,10 +267,14 @@ inline void posetail_handle_requests(PosetailWindowState &st,
                                    joints_total, num_cams, instance_id);
     };
 
-    // ── Server: one 16-frame chunk ──
+    // ── Server: send only the requested horizon, rounded up to an even T.
+    // t=0 is the seed, so N future predictions need N+1 input frames.
     if (st.use_server) {
         rt.server.url = st.server_url;
-        const int T = posetail_detail::T_CHUNK;
+        const int n_keep = std::clamp(st.server_n_keep, 1,
+                                      posetail_detail::T_CHUNK - 1);
+        const int T = std::min(posetail_detail::T_CHUNK,
+                               ((n_keep + 2) / 2) * 2);
 
         std::deque<std::vector<uint8_t>> scratch;
         std::vector<const uint8_t *> frames((size_t)num_cams * T, nullptr);
@@ -290,7 +294,7 @@ inline void posetail_handle_requests(PosetailWindowState &st,
         auto t_start = std::chrono::steady_clock::now();
         PosetailChunkResult chunk = posetail_server_predict_chunk(
             rt.server, frames, widths, heights, pm.camera_params, seed,
-            /*seed_t=*/0, cam_names);
+            /*seed_t=*/0, cam_names, T);
         float ms = std::chrono::duration<float, std::milli>(
                        std::chrono::steady_clock::now() - t_start).count();
         st.server_last_total_ms = rt.server.last_total_ms;
@@ -307,7 +311,6 @@ inline void posetail_handle_requests(PosetailWindowState &st,
             return;
         }
         // t=0 is the seed; write t=1..n_keep.
-        const int n_keep = std::clamp(st.server_n_keep, 1, T - 1);
         for (int t = 1; t <= n_keep && t < (int)chunk.kp3d.size(); ++t) {
             FrameAnnotation &fa = future_frame(t);
             for (int q = 0; q < (int)seed_node_idx.size() &&

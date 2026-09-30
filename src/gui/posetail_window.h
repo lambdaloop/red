@@ -7,8 +7,8 @@
 // reprojected 2D into the annotation buffer for frames [current+1 .. current+N].
 //
 // Two backends:
-//   Server (HTTP) — default. One 16-frame chunk per click sent to
-//                   posetail/server/server.py; no GPU / ONNX needed locally.
+//   Server (HTTP) — default. The minimum even number of frames needed for
+//                   the requested horizon is sent per click (max 16).
 //   Local ONNX    — chains 16-frame chunks to reach +N; needs the ONNX
 //                   Runtime bundle at lib/onnxruntime (RED_HAS_ONNXRUNTIME).
 //
@@ -47,7 +47,8 @@ struct PosetailWindowState {
     std::string server_url = "http://10.102.10.88:8000";
     bool server_probe_requested = false;
     std::string server_status;
-    // How many of the 15 future frames from a 16-frame chunk to write back.
+    // Number of future predictions to write back (server input frames are
+    // rounded up to an even count, including the seed frame).
     int server_n_keep = 15;
     // Cached /info reply for display.
     int server_n_frames = 0;
@@ -215,10 +216,10 @@ inline void DrawPosetailWindow(PosetailWindowState &st, AppContext &ctx) {
                              15);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
-                    "Server returns one 16-frame chunk per click: t=0 is the\n"
-                    "seed (current frame), t=1..15 are future predictions.\n"
-                    "This slider picks how many of those 15 to write into\n"
-                    "annotations for frames [current+1 .. current+N].");
+                    "The server requires an even number of input frames.\n"
+                    "t=0 is the seed, so requesting N future predictions sends\n"
+                    "the next even frame count >= N+1 (e.g. +5 sends 6).\n"
+                    "At most 16 frames can be sent per request.");
         } else {
             if (st.onnx_path.empty())
                 st.onnx_path = posetail_ui_detail::find_default_onnx();
@@ -280,9 +281,9 @@ inline void DrawPosetailWindow(PosetailWindowState &st, AppContext &ctx) {
             if (st.use_server)
                 ImGui::SetTooltip(
                     "Seed from the current frame's 3D keypoints of the active\n"
-                    "animal, send all cameras x 16 frames to the server, and\n"
-                    "write the first N future-frame predictions (3D +\n"
-                    "reprojected 2D) into annotations for that animal.\n"
+                    "animal, send all cameras x the minimum even number of\n"
+                    "frames needed to the server, and write the N future-frame\n"
+                    "predictions (3D + reprojected 2D) into annotations.\n"
                     "Requires all cameras to have frames in the display buffer.");
             else
                 ImGui::SetTooltip(

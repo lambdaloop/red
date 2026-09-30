@@ -403,7 +403,8 @@ inline PosetailChunkResult posetail_server_predict_chunk(
     const std::vector<CameraParams> &cams,
     const std::vector<Eigen::Vector3d> &seed_3d,
     int seed_t = 0,
-    const std::vector<std::string> &cam_names_opt = {}) {
+    const std::vector<std::string> &cam_names_opt = {},
+    int n_frames = posetail_detail::T_CHUNK) {
     using namespace posetail_detail;
     using namespace posetail_server_detail;
 
@@ -414,8 +415,12 @@ inline PosetailChunkResult posetail_server_predict_chunk(
         r.error = "No cameras or queries";
         return r;
     }
-    if ((int)frames_rgba_per_cam_per_t.size() != num_cams * T_CHUNK) {
-        r.error = "frames buffer size mismatch (need cams*16)";
+    if (n_frames < 2 || n_frames > T_CHUNK || n_frames % 2 != 0) {
+        r.error = "frame count must be even and between 2 and 16";
+        return r;
+    }
+    if ((int)frames_rgba_per_cam_per_t.size() != num_cams * n_frames) {
+        r.error = "frames buffer size mismatch";
         return r;
     }
     if (s.url.empty()) {
@@ -438,7 +443,7 @@ inline PosetailChunkResult posetail_server_predict_chunk(
     // lossless; the model was trained on raw frames so we keep it lossless.
     // Switch to JPEG here if upload time is the bottleneck.
     httplib::MultipartFormDataItems items;
-    items.reserve((size_t)num_cams * T_CHUNK + 1);
+    items.reserve((size_t)num_cams * n_frames + 1);
 
     auto t_enc0 = std::chrono::steady_clock::now();
     int encoded = 0, skipped = 0;
@@ -447,14 +452,14 @@ inline PosetailChunkResult posetail_server_predict_chunk(
                                  !cam_names_opt[c].empty())
             ? cam_names_opt[c]
             : std::to_string(c);
-        for (int t = 0; t < T_CHUNK; ++t) {
-            const uint8_t *rgba = frames_rgba_per_cam_per_t[c * T_CHUNK + t];
+        for (int t = 0; t < n_frames; ++t) {
+            const uint8_t *rgba = frames_rgba_per_cam_per_t[c * n_frames + t];
             std::vector<uint8_t> png =
                 encode_crop_png(rgba, cam_widths[c], cam_heights[c], boxes[c]);
             if (png.empty()) {
                 skipped++;
                 // Send a solid-grey PNG instead so the server still sees
-                // T_CHUNK images and we don't break the request.
+                // a complete even-length frame sequence.
                 png = grey_png();
             } else {
                 encoded++;
@@ -585,14 +590,14 @@ inline PosetailChunkResult posetail_server_predict_chunk(
             // coords_pred: (B=1, T, N, 3)
             if (v.shape.size() != 4 ||
                 v.shape[0] != 1 ||
-                v.shape[1] != T_CHUNK ||
+                v.shape[1] != n_frames ||
                 v.shape[2] != N ||
                 v.shape[3] != 3) {
                 r.error = std::string("Bad shape for ") + key;
                 return false;
             }
-            dst_kp->assign(T_CHUNK, std::vector<Eigen::Vector3d>(N));
-            for (int t = 0; t < T_CHUNK; ++t)
+            dst_kp->assign(n_frames, std::vector<Eigen::Vector3d>(N));
+            for (int t = 0; t < n_frames; ++t)
                 for (int n = 0; n < N; ++n) {
                     const float *p = fp + ((t * N) + n) * 3;
                     (*dst_kp)[t][n] = Eigen::Vector3d(p[0], p[1], p[2]);
@@ -604,19 +609,19 @@ inline PosetailChunkResult posetail_server_predict_chunk(
             // float layout in memory either way.
             bool ok_shape = false;
             if (v.shape.size() == 4 &&
-                v.shape[0] == 1 && v.shape[1] == T_CHUNK &&
+                v.shape[0] == 1 && v.shape[1] == n_frames &&
                 v.shape[2] == N && v.shape[3] == 1)
                 ok_shape = true;
             else if (v.shape.size() == 3 &&
-                     v.shape[0] == 1 && v.shape[1] == T_CHUNK &&
+                     v.shape[0] == 1 && v.shape[1] == n_frames &&
                      v.shape[2] == N)
                 ok_shape = true;
             if (!ok_shape) {
                 r.error = std::string("Bad shape for ") + key;
                 return false;
             }
-            dst_2d_TN1.assign(T_CHUNK, std::vector<float>(N, 0.0f));
-            for (int t = 0; t < T_CHUNK; ++t)
+            dst_2d_TN1.assign(n_frames, std::vector<float>(N, 0.0f));
+            for (int t = 0; t < n_frames; ++t)
                 for (int n = 0; n < N; ++n)
                     dst_2d_TN1[t][n] = fp[(t * N + n)];
         }
@@ -640,7 +645,7 @@ inline PosetailChunkResult posetail_server_predict_chunk(
     fprintf(stderr,
             "[PoseTail/server] cams=%d N=%d T=%d  encode=%.1f ms (%d ok, %d "
             "filled) request=%.1f ms decode=%.1f ms  total=%.1f ms\n",
-            num_cams, N, T_CHUNK, s.last_encode_ms, encoded, skipped,
+            num_cams, N, n_frames, s.last_encode_ms, encoded, skipped,
             s.last_request_ms, s.last_decode_ms, s.last_total_ms);
     r.ok = true;
     return r;

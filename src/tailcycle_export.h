@@ -19,6 +19,7 @@
 
 #include "annotation.h"
 #include "camera.h"
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,6 +42,10 @@ struct ExportConfig {
     float fps = 0.0f;
     int source_frame_start = 0;     // red's frame_number is absolute; §6 rebases
     std::string source_video;
+    // Several clips of the recording, each its own group. Replaces the single
+    // group above when non-empty; a label in no group is not exported.
+    struct Group { std::string id; int n_frames = 0; int source_frame_start = 0; };
+    std::vector<Group> groups;
 
     std::string units = "mm";
 
@@ -88,7 +93,21 @@ struct ExportConfig {
     // detector settings, the source paths, assoc_res_max_px -- and the
     // exporter writes 9 of them, so correcting one keypoint would have thrown
     // the other 35 away.
+    //
+    // The label tables are merged, not replaced. Rows of groups other than
+    // the ones written are kept as they are. Within them, red rewrites only
+    // what was edited -- a camera view (red frame, camera index) in
+    // `edited_views` for keypoints.pq and instances.pq, a red frame in
+    // `edited_frames_3d` for points3d.pq -- and keeps every other row as it
+    // is on disk, `present`/`absent` instance rows included. An edited view's
+    // instance rows become exactly red's boxes, all `labeled`; its old
+    // keypoint rows that red never loads (`unlabeled`, null coordinates) and
+    // an edited frame's non-`visible` 3D rows are kept unless red writes the
+    // same key. A table left with no rows is deleted. Tables outside `layers`
+    // are not touched. Columns outside the format's schema are not kept.
     bool in_place = false;
+    std::set<std::pair<int, int>> edited_views;
+    std::set<int> edited_frames_3d;
 
     std::string provenance_source;
     std::string annotator;          // empty when one annotator authored the root (§2.11)

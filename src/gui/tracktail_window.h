@@ -51,6 +51,8 @@ struct TracktailWindowState {
     float server_last_decode_ms = 0.0f;
 
     // ── Run ──
+    // Hand-placed keypoints on the target frames are kept unless this is set.
+    bool overwrite_manual = false;
     bool forward_requested = false;
     std::string last_result;  // one-line summary of the last Forward
     bool last_result_ok = true;
@@ -165,6 +167,11 @@ inline void DrawTracktailWindow(TracktailWindowState &st, AppContext &ctx) {
         char fwd_label[64];
         std::snprintf(fwd_label, sizeof(fwd_label), "tracktail Forward +%d",
                       st.server_n_keep);
+        ImGui::Checkbox("Overwrite hand-placed labels", &st.overwrite_manual);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Off: a tracked keypoint placed by hand on a target frame is\n"
+                "kept, and so are occluded marks. On: predictions replace them.");
         const bool can_run = !is_2d && videos_loaded && (n_3d > 0 ||
                              (st.auto_triangulate && n_2d >= 2));
         ImGui::BeginDisabled(!can_run);

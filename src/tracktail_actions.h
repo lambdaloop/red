@@ -11,7 +11,8 @@
 // prediction for frames [current+1 .. current+N] is written into that same
 // animal's FrameAnnotation (matched by instance_id, created if missing) as 3D
 // + reprojected 2D, both marked Predicted. Other animals in those
-// frames are untouched.
+// frames are untouched, and so are hand-placed keypoints unless the panel
+// says to overwrite them.
 
 #include "app_context.h"
 #include "gui/gui_keypoints.h"   // reprojection() (triangulate), reproject_3d_to_cam()
@@ -78,9 +79,17 @@ inline const uint8_t *pull_frame_host(AppContext &ctx, int cam, int frame_off,
 }
 
 // Write one predicted 3D point into `fa` (3D + reprojected 2D per camera).
-inline void write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &X,
-                             AppContext &ctx) {
-    if (k < 0 || k >= (int)fa.kp3d.size()) return;
+// A keypoint placed by hand in any camera is left alone, and cameras where it
+// is marked occluded keep that, unless `overwrite_manual`. Returns false when
+// the keypoint was skipped.
+inline bool write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &X,
+                             AppContext &ctx, bool overwrite_manual) {
+    if (k < 0 || k >= (int)fa.kp3d.size()) return false;
+    if (!overwrite_manual)
+        for (const auto &cam : fa.cameras)
+            if (k < (int)cam.keypoints.size() && cam.keypoints[k].is_manual() &&
+                keypoint2d_assessed(cam.keypoints[k]))
+                return false;
     fa.kp3d[k].x = X(0);
     fa.kp3d[k].y = X(1);
     fa.kp3d[k].z = X(2);
@@ -89,11 +98,12 @@ inline void write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &
     for (int v = 0; v < num_cams && v < (int)ctx.pm.camera_params.size(); ++v) {
         if (v >= (int)fa.cameras.size()) continue;
         if (k >= (int)fa.cameras[v].keypoints.size()) continue;
+        auto &kp = fa.cameras[v].keypoints[k];
+        if (kp.is_occluded() && !overwrite_manual) continue;
         double px, py;
         if (reproject_3d_to_cam(X, ctx.pm.camera_params[v],
                                 (int)ctx.scene->image_width[v],
                                 (int)ctx.scene->image_height[v], px, py)) {
-            auto &kp = fa.cameras[v].keypoints[k];
             kp.x = px;
             kp.y = py;
             kp.vis = Keypoint2D::Vis::Unknown;
@@ -101,6 +111,7 @@ inline void write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &
             kp.reprojected = true;
         }
     }
+    return true;
 }
 
 // Collect the seed from the active animal on the current frame. Triangulates
@@ -275,11 +286,14 @@ inline void tracktail_handle_requests(TracktailWindowState &st,
         printf("[tracktail/server] FAILED: %s\n", chunk.error.c_str());
         return;
     }
+    int kept_manual = 0;
     for (int t = 1; t <= n_keep && t < (int)chunk.kp3d.size(); ++t) {
         FrameAnnotation &fa = future_frame(t);
         for (int q = 0; q < (int)seed_node_idx.size() &&
                         q < (int)chunk.kp3d[t].size(); ++q)
-            write_prediction(fa, seed_node_idx[q], chunk.kp3d[t][q], ctx);
+            if (!write_prediction(fa, seed_node_idx[q], chunk.kp3d[t][q], ctx,
+                                  st.overwrite_manual))
+                kept_manual++;
     }
     char buf[256];
     std::snprintf(buf, sizeof(buf),
@@ -288,6 +302,9 @@ inline void tracktail_handle_requests(TracktailWindowState &st,
                   rt.server.last_total_ms);
     st.server_status = buf;
     st.last_result = buf;
+    if (kept_manual)
+        st.last_result += ", kept " + std::to_string(kept_manual) +
+                          " hand-placed keypoint" + (kept_manual == 1 ? "" : "s");
     st.last_result_ok = true;
     ctx.toasts.pushSuccess("tracktail: +" + std::to_string(n_keep) +
                            " frames (animal id " +

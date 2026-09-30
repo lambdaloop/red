@@ -28,7 +28,9 @@ last predicted frame continues the track). Only those keypoints are tracked;
 nodes with no 3D are left alone. Other
 animals in the future frames are untouched (the prediction is written into
 the FrameAnnotation whose `instance_id` matches the seed, created if the
-frame has none yet).
+frame has none yet). A tracked keypoint placed by hand on a target frame is
+kept, and so are occluded marks, unless *Overwrite hand-placed labels* is
+ticked.
 
 All cameras must have the next `n_frames` frames (the model's chunk length,
 see below) in the display buffer, which is the

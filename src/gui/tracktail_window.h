@@ -155,10 +155,10 @@ inline void DrawTracktailWindow(TracktailWindowState &st, AppContext &ctx) {
                          24);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "The server returns one chunk of n_frames per click: t=0 is\n"
-                "the seed (current frame), the rest are future predictions.\n"
-                "This slider picks how many to write into annotations for\n"
-                "frames [current+1 .. current+N], up to n_frames-1.");
+                "t=0 is the seed (current frame), the rest are future\n"
+                "predictions. Only the seed + N frames are sent, rounded up\n"
+                "to an even count (e.g. +5 sends 6), up to n_frames.\n"
+                "Writes frames [current+1 .. current+N], up to n_frames-1.");
 
         // ── Run ──
         ImGui::SeparatorText("Run");
@@ -173,7 +173,8 @@ inline void DrawTracktailWindow(TracktailWindowState &st, AppContext &ctx) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
                 "Seed from the current frame's 3D keypoints of the active\n"
-                "animal, send all cameras x n_frames to the server, and\n"
+                "animal, send all cameras x the frames needed to the\n"
+                "server (even count, up to n_frames), and\n"
                 "write the first N future-frame predictions (3D +\n"
                 "reprojected 2D) into annotations for that animal.\n"
                 "Requires all cameras to have frames in the display buffer.");

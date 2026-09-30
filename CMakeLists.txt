@@ -67,6 +67,12 @@ macro(red_resolve_parquet)
     endif()
 endmacro()
 
+# tracktail forward tracker (src/tracktail_*.h): an HTTP client for the
+# tracktail server, built on cpp-httplib (submodule) + vendored miniz.
+set(DIR_HTTPLIB "${CMAKE_SOURCE_DIR}/lib/httplib")
+set(DIR_MINIZ   "${CMAKE_SOURCE_DIR}/lib/miniz")
+set(MINIZ_SRC   "${DIR_MINIZ}/miniz.c")   # C source: project() lists C below
+
 # Default to an optimized build. Without this the build type is empty and the
 # compiler runs at -O0, which cripples hot host loops (e.g. the HybridNet
 # reprojection: 3200ms at -O0 vs ~450ms at -O3). Respects an explicit
@@ -77,7 +83,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 if(APPLE)
-    project(red LANGUAGES CXX OBJCXX)
+    project(red LANGUAGES C CXX OBJCXX)
     red_resolve_parquet()
 
     # Where the macOS dependencies live (Eigen, FFmpeg, GLFW, Ceres,
@@ -148,6 +154,7 @@ if(APPLE)
         ${MM_SRC_FILES}
         ${IMGUI_SRC}
         ${IMPLOT_SRC}
+        ${MINIZ_SRC}   # tracktail server NPZ decode
     )
 
     target_include_directories(red PRIVATE
@@ -156,6 +163,8 @@ if(APPLE)
         ${DIR_IMGUI}/backends
         ${DIR_IMPLOT}
         ${DIR_FILEBROWSER}
+        ${DIR_HTTPLIB}
+        ${DIR_MINIZ}
         lib/nvcodec
         lib/IconFontCppHeaders
         ${FFMPEG_INCLUDE_DIRS}
@@ -464,7 +473,7 @@ if(APPLE)
 
 elseif(WIN32)
     # Windows build with NVIDIA CUDA support (RTX 3090)
-    project(red LANGUAGES CXX)
+    project(red LANGUAGES C CXX)
     red_resolve_cuda()
     red_resolve_parquet()
     if(RED_CUDA)
@@ -582,6 +591,7 @@ elseif(WIN32)
         ${IMGUI_SRC}
         ${IMPLOT_SRC}
         ${CUDA_SRC_FILES}
+        ${MINIZ_SRC}   # tracktail server NPZ decode
     )
 
 
@@ -604,6 +614,8 @@ elseif(WIN32)
         ${DIR_FILEBROWSER}
         ${DIR_ICONFONT}
         ${DIR_NVCODEC}
+        ${DIR_HTTPLIB}
+        ${DIR_MINIZ}
         ${CUDA_DIR}/include
         ${FFMPEG_INCLUDE_DIRS}
     )
@@ -622,6 +634,8 @@ elseif(WIN32)
         opengl32
         # CUDA + bundled NVDEC (empty without RED_ENABLE_CUDA)
         ${RED_CUDA_LIBS}
+        # WinSock for cpp-httplib (tracktail server client)
+        ws2_32
     )
 
     # FFmpeg libraries
@@ -732,7 +746,7 @@ else()
     # links read-only against those shared installs.
     # No OpenCV, no LibTorch.
     # ────────────────────────────────────────────────────────────────────────
-    project(red LANGUAGES CXX)
+    project(red LANGUAGES C CXX)
     red_resolve_cuda()
     red_resolve_parquet()
     if(RED_CUDA)
@@ -741,6 +755,12 @@ else()
         # -DCMAKE_CUDA_ARCHITECTURES=... on the cmake command line if needed.
         if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
             set(CMAKE_CUDA_ARCHITECTURES 86 89)
+        endif()
+        # The .cu files are plain C++17. Without this, CXX_STANDARD 20 below
+        # propagates to them as "CUDA20", which CMake < 3.24 cannot translate
+        # into an nvcc flag and configure fails.
+        if(NOT DEFINED CMAKE_CUDA_STANDARD)
+            set(CMAKE_CUDA_STANDARD 17)
         endif()
     endif()
     set(CMAKE_CXX_STANDARD 20)
@@ -834,6 +854,7 @@ else()
         ${IMGUI_SRC}
         ${IMPLOT_SRC}
         ${CUDA_SRC_FILES}
+        ${MINIZ_SRC}   # tracktail server NPZ decode
     )
 
 
@@ -853,6 +874,8 @@ else()
         ${DIR_FILEBROWSER}
         ${DIR_ICONFONT}
         ${DIR_NVCODEC}
+        ${DIR_HTTPLIB}
+        ${DIR_MINIZ}
     )
 
     # Link libraries
@@ -869,7 +892,6 @@ else()
         Threads::Threads
         ${CMAKE_DL_LIBS}
     )
-
 
     # RPATH: isolate bundled ML libs from system / orange's toolchain.
     # $ORIGIN so the installed binary finds them relative to itself; build

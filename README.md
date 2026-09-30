@@ -145,6 +145,15 @@ Remove-Item Env:RED_DECODE_BACKEND       # back to the default
 
 red prints which backend it chose at startup.
 
+### tracktail (this branch)
+
+`multianimal_posetail` adds **Tools → tracktail**: label one frame,
+triangulate, and tracktail predicts the next frames for that animal across
+all cameras (3D + reprojected 2D, marked *Predicted*). Inference runs on
+the tracktail HTTP server (`server/server.py` in
+[AI-HHMI/tracktail](https://github.com/AI-HHMI/tracktail)), so red needs
+nothing extra to build. See [`docs/TRACKTAIL.md`](docs/TRACKTAIL.md).
+
 ## Authors
 
 **Red** is developed by Jinyao Yan, with contributions from Wilson Chen, Diptodip Deb, Ratan Othayoth, and Rob Johnson.

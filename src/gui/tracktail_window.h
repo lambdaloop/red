@@ -87,11 +87,11 @@ inline void DrawTracktailWindow(TracktailWindowState &st, AppContext &ctx) {
             inst_id = fa.instance_id;
             for (int k = 0; k < (int)fa.kp3d.size() &&
                             k < ctx.skeleton.num_nodes; ++k)
-                if (fa.kp3d[k].triangulated) n_3d++;
+                if (fa.kp3d[k].exist) n_3d++;
             for (const auto &cam : fa.cameras)
                 for (int k = 0; k < (int)cam.keypoints.size() &&
                                 k < ctx.skeleton.num_nodes; ++k)
-                    if (cam.keypoints[k].labeled) { n_2d++; break; }
+                    if (cam.keypoints[k].usable()) { n_2d++; break; }
         }
         ImGui::Text("Frame %d   animal %d/%d (id %d)", ctx.current_frame_num,
                     n_inst ? ctx.active_instance + 1 : 0, n_inst, inst_id);

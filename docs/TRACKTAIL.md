@@ -22,8 +22,10 @@ frame — no JARVIS, no prediction store, no separate detector.
    only. Fix them in the Labeling Tool like any other label; Save writes them
    with the rest.
 
-The seed is the active animal's triangulated keypoints on the current frame.
-Only those keypoints are tracked; untriangulated ones are left alone. Other
+The seed is the active animal's 3D keypoints on the current frame, whether
+triangulated or predicted by an earlier click (so clicking again from the
+last predicted frame continues the track). Only those keypoints are tracked;
+nodes with no 3D are left alone. Other
 animals in the future frames are untouched (the prediction is written into
 the FrameAnnotation whose `instance_id` matches the seed, created if the
 frame has none yet).

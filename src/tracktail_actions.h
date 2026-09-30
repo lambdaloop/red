@@ -10,7 +10,7 @@
 // (2D labels are triangulated first when the panel's checkbox is on). The
 // prediction for frames [current+1 .. current+N] is written into that same
 // animal's FrameAnnotation (matched by instance_id, created if missing) as 3D
-// + reprojected 2D marked LabelSource::Predicted. Other animals in those
+// + reprojected 2D, both marked Predicted. Other animals in those
 // frames are untouched.
 
 #include "app_context.h"
@@ -84,7 +84,7 @@ inline void write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &
     fa.kp3d[k].x = X(0);
     fa.kp3d[k].y = X(1);
     fa.kp3d[k].z = X(2);
-    fa.kp3d[k].set_triangulated();
+    fa.kp3d[k].set_predicted();  // tracker output, awaiting review
     const int num_cams = (int)ctx.scene->num_cams;
     for (int v = 0; v < num_cams && v < (int)ctx.pm.camera_params.size(); ++v) {
         if (v >= (int)fa.cameras.size()) continue;
@@ -96,8 +96,9 @@ inline void write_prediction(FrameAnnotation &fa, int k, const Eigen::Vector3d &
             auto &kp = fa.cameras[v].keypoints[k];
             kp.x = px;
             kp.y = py;
-            kp.labeled = true;
-            kp.source = LabelSource::Predicted;
+            kp.vis = Keypoint2D::Vis::Unknown;
+            kp.set_predicted();
+            kp.reprojected = true;
         }
     }
 }
@@ -122,7 +123,7 @@ inline bool collect_seed(TracktailWindowState &st, AppContext &ctx,
     auto count_3d = [&]() {
         int n = 0;
         for (int k = 0; k < (int)fa.kp3d.size() && k < ctx.skeleton.num_nodes; ++k)
-            if (fa.kp3d[k].triangulated) n++;
+            if (fa.kp3d[k].exist) n++;
         return n;
     };
     if (count_3d() == 0 && st.auto_triangulate) {
@@ -132,7 +133,7 @@ inline bool collect_seed(TracktailWindowState &st, AppContext &ctx,
                ctx.current_frame_num, instance_id);
     }
     for (int k = 0; k < (int)fa.kp3d.size() && k < ctx.skeleton.num_nodes; ++k) {
-        if (!fa.kp3d[k].triangulated) continue;
+        if (!fa.kp3d[k].exist) continue;
         seed.emplace_back(fa.kp3d[k].x, fa.kp3d[k].y, fa.kp3d[k].z);
         seed_node_idx.push_back(k);
     }
